@@ -63,6 +63,22 @@ The built-in email sender on the free plan only sends a few emails per hour, so 
 ### 5. Deploy on GitHub Pages
 Go to **Settings → Pages → Build and deployment**, choose **Deploy from a branch**, then select `main` and `/ (root)`.
 
+## Android-only viewing (blocks screenshots)
+
+Viewers can only open documents in the **Secure Doc Share Android app** (`android/`). It's a small WebView app with Android's `FLAG_SECURE` switched on, so the phone refuses screenshots and screen recordings and hides the app in the recent-apps view.
+
+- **Opening a link in a browser** shows an "Open in app" screen with an APK download. It does not open the document.
+- **The database enforces it.** `supabase/002_android_only.sql` makes viewers call `start_view()` with the app key before storage will release a file. A browser has no key and is refused.
+- **Automatic builds.** GitHub Actions (`.github/workflows/android.yml`) builds and signs the APK and publishes it as the latest release.
+
+Setup:
+1. Run `supabase/002_android_only.sql` in the SQL Editor, then insert your app key hash into `app_secrets`.
+2. Add two repository secrets under **Settings → Secrets and variables → Actions**: `APP_KEY` and `KEYSTORE_BASE64`.
+3. In Supabase, add `securedocshare://auth` under **Authentication → URL Configuration → Redirect URLs**.
+4. Run **Actions → Build Android app → Run workflow**.
+
+> The app key is hidden inside the APK, not truly secret. A determined developer could extract it, but ordinary viewers can't get past the app. iPhones are not supported.
+
 ## Using it
 1. Open `…/secure-doc-share/admin.html` and sign in.
 2. Upload a PDF and paste the allowed email IDs, separated by commas or new lines.

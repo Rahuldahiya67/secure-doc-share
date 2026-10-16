@@ -1,0 +1,68 @@
+plugins {
+    id "com.android.application"
+}
+
+// The app key comes from the APP_KEY GitHub secret at build time and is never
+// committed. It is stored XOR-masked so it doesn't show up as plain text in the APK.
+def KEY_MASK = "sds-viewer-2026"
+
+String xorHex(String value, String mask) {
+    def out = new StringBuilder()
+    byte[] bytes = value.getBytes("UTF-8")
+    for (int i = 0; i < bytes.length; i++) {
+        int v = (bytes[i] ^ (int) mask.charAt(i % mask.length())) & 0xff
+        out.append(String.format("%02x", v))
+    }
+    return out.toString()
+}
+
+def appKey = System.getenv("APP_KEY") ?: ""
+def keystoreFile = System.getenv("KEYSTORE_FILE")
+def keystorePassword = System.getenv("KEYSTORE_PASSWORD") ?: appKey
+
+android {
+    namespace "io.github.rahuldahiya67.securedocshare"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.rahuldahiya67.securedocshare"
+        minSdk 24
+        targetSdk 35
+        versionCode((System.getenv("VERSION_CODE") ?: "1") as int)
+        versionName "1.0.${System.getenv("VERSION_CODE") ?: "0"}"
+        buildConfigField "String", "K", "\"${xorHex(appKey, KEY_MASK)}\""
+        buildConfigField "String", "M", "\"${KEY_MASK}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreFile) {
+                storeFile file(keystoreFile)
+                storePassword keystorePassword
+                keyAlias "securedoc"
+                keyPassword keystorePassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig keystoreFile ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}

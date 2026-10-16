@@ -11,6 +11,9 @@
 
   const $ = (sel, root = document) => root.querySelector(sel);
 
+  // The Android app injects window.SecureDocApp into its WebView.
+  const inApp = typeof window.SecureDocApp === "object" && window.SecureDocApp !== null;
+
   function esc(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
@@ -34,6 +37,7 @@
   }
 
   function renderSignIn(target, { title, subtitle }) {
+    if (inApp) return renderAppSignIn(target, { title, subtitle });
     target.innerHTML = `
       <div class="card narrow">
         <h2>${esc(title)}</h2>
@@ -64,6 +68,30 @@
     };
   }
 
+  // Inside the app Google refuses embedded sign-in, so the app opens the
+  // Google page in Chrome and Supabase sends the user back via securedocshare://auth.
+  function renderAppSignIn(target, { title, subtitle }) {
+    target.innerHTML = `
+      <div class="card narrow">
+        <h2>${esc(title)}</h2>
+        <p class="sub">${esc(subtitle)}</p>
+        <button id="google" class="primary full" type="button">Continue with Google</button>
+        <p class="muted" style="font-size:13px;margin-top:12px">Google sign-in opens in Chrome and brings you back here.</p>
+        <div id="authmsg" class="msg"></div>
+      </div>`;
+    const msg = $("#authmsg", target);
+    $("#google", target).onclick = async () => {
+      const doc = new URLSearchParams(location.search).get("doc");
+      try { if (doc) localStorage.setItem("pendingDoc", doc); } catch (_) {}
+      const { data, error } = await sb.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${cfg.appScheme}://auth`, skipBrowserRedirect: true }
+      });
+      if (error) { msg.className = "msg err"; msg.textContent = error.message; return; }
+      window.SecureDocApp.openExternal(data.url);
+    };
+  }
+
   function renderHeader(user, extra = "") {
     const bar = $("#bar");
     if (!bar) return;
@@ -80,5 +108,5 @@
     return data.session?.user ?? null;
   }
 
-  window.App = { sb, cfg, configured, $, esc, renderSignIn, renderNotConfigured, renderHeader, getUser, returnUrl };
+  window.App = { sb, cfg, configured, inApp, $, esc, renderSignIn, renderNotConfigured, renderHeader, getUser, returnUrl };
 })();
