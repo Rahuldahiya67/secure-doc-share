@@ -79,6 +79,18 @@ Setup:
 
 > The app key is hidden inside the APK, not truly secret. A determined developer could extract it, but ordinary viewers can't get past the app. iPhones are not supported.
 
+## Owner dashboard and reading analytics
+
+`admin.html` is a dashboard with an overview, documents, people, activity and a blocklist:
+
+- **Overview**: documents sharing, people with access, total reading time, who is reading right now, a 14-day reading chart, recent activity and the most-read documents.
+- **Document page**: share link with Copy and WhatsApp buttons, who has and hasn't opened it, time per person, furthest page reached, time spent on each page, and every session. You can also edit the title or expiry, replace the PDF while keeping the same link, turn the link off, or delete it.
+- **People**: everyone you've shared with, their reading time, how many documents they opened, and their devices (more than one phone is flagged). You can block someone or remove them from all documents.
+- **Activity**: every reading session, with filters and CSV export.
+- **Blocked**: blocked emails can't open anything until you unblock them.
+
+Run `supabase/003_analytics.sql` to switch this on. Reading time is measured by the server between heartbeats sent every 15 seconds, capped at 30 seconds each, so time with the app in the background isn't counted and can't be faked.
+
 ## Using it
 1. Open `…/secure-doc-share/admin.html` and sign in.
 2. Upload a PDF and paste the allowed email IDs, separated by commas or new lines.
