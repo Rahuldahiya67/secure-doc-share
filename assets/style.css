@@ -296,16 +296,27 @@ dialog .dlg-foot { padding: 14px 22px; border-top: 1px solid var(--rule); displa
   background: var(--seal-soft); color: var(--ink-2); overflow-wrap: anywhere;
 }
 .viewer-banner svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--seal); }
-.viewer .pages { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.viewer .pages { overflow-x: auto; overflow-y: hidden; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; padding-bottom: 72px; }
+.viewer .pages.zoomed { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
+.zoom-inner { margin: 0 auto; will-change: transform; }
 .viewer canvas {
-  display: block; max-width: 100%; height: auto; background: #fff;
+  display: block; width: 100%; height: auto; margin: 0 0 14px; background: #fff;
   border-radius: 4px; box-shadow: 0 2px 14px rgba(20, 33, 61, 0.16); pointer-events: none;
 }
 .page-pill {
-  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 10;
-  background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 500; padding: 7px 14px; border-radius: 99px;
-  font-variant-numeric: tabular-nums;
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 10;
+  display: flex; align-items: center; gap: 2px;
+  background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 500; padding: 4px 14px 4px 4px; border-radius: 99px;
+  font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
 }
+.page-pill[hidden] { display: none; }
+.page-pill button {
+  min-height: 36px; border: 0; background: transparent; color: inherit; border-radius: 99px; font: inherit;
+}
+.page-pill .zbtn { width: 36px; padding: 0; font-size: 20px; font-weight: 400; }
+.page-pill .zlvl { padding: 0 6px; min-width: 52px; }
+.page-pill button:hover, .page-pill button:active { background: rgba(255, 255, 255, 0.14); border: 0; }
+.page-pill .zsep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.25); margin: 0 10px 0 6px; }
 .shield {
   position: fixed; inset: 0; z-index: 50; display: none;
   align-items: center; justify-content: center; text-align: center; padding: 24px;

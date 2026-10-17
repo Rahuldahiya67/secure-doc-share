@@ -124,32 +124,138 @@
         <div class="viewer-banner">${icon("lock")}<span>Viewing as <strong>${esc(user.email)}</strong>. Screenshots and recording are blocked, and every page carries your email.</span></div>
         <div class="pages" id="pages"><p class="muted">Loading document…</p></div>
       </div>
-      <div class="page-pill" id="pill" hidden></div>
+      <div class="page-pill" id="pill" hidden>
+        <button type="button" class="zbtn" id="zOut" aria-label="Zoom out">−</button>
+        <button type="button" class="zlvl" id="zLvl" aria-label="Fit to width">100%</button>
+        <button type="button" class="zbtn" id="zIn" aria-label="Zoom in">+</button>
+        <span class="zsep" aria-hidden="true"></span>
+        <span id="pageNum">Page 1</span>
+      </div>
       <div class="shield">Content hidden. Tap to keep reading.</div>`;
 
     const buf = await (await fetch(signed.signedUrl)).arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf, isEvalSupported: false }).promise;
     const pagesEl = $("#pages");
-    pagesEl.innerHTML = "";
+    pagesEl.innerHTML = `<div class="zoom-inner" id="zoomInner"></div>`;
+    const inner = $("#zoomInner");
 
     const stamp = `${user.email}  ${new Date().toLocaleString()}`;
-    const maxWidth = Math.min(pagesEl.clientWidth || 900, 900);
+    const fitW = Math.min(pagesEl.clientWidth || 900, 900);
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    inner.style.width = `${fitW}px`;
 
+    const MIN = 1, MAX = 4;
+    let zoom = 1, gen = 0, pending = null;
+    const pages = [];
     for (let n = 1; n <= pdf.numPages; n++) {
       const page = await pdf.getPage(n);
       const base = page.getViewport({ scale: 1 });
-      const vp = page.getViewport({ scale: (maxWidth / base.width) * ratio });
       const canvas = document.createElement("canvas");
-      canvas.width = Math.floor(vp.width);
-      canvas.height = Math.floor(vp.height);
-      canvas.style.width = `${Math.floor(vp.width / ratio)}px`;
       canvas.dataset.page = String(n);
-      const ctx = canvas.getContext("2d");
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      watermark(ctx, canvas.width, canvas.height, stamp, ratio);
-      pagesEl.appendChild(canvas);
+      canvas.width = Math.floor(fitW * ratio);
+      canvas.height = Math.floor(fitW * ratio * base.height / base.width);
+      inner.appendChild(canvas);
+      const p = { n, page, base, canvas, res: 0 };
+      pages.push(p);
+      await renderPage(p, 1);
     }
+
+    // ---------- zoom ----------
+
+    // Render (or re-render sharper) a page for the given zoom. Pixel width is
+    // capped so very high zoom doesn't exhaust phone memory.
+    async function renderPage(p, z) {
+      const pxWidth = Math.min(fitW * z * ratio, 3200);
+      const scale = pxWidth / p.base.width;
+      if (Math.abs(p.res - scale) < 0.01) return;
+      const myGen = gen;
+      const vp = p.page.getViewport({ scale });
+      const off = document.createElement("canvas");
+      off.width = Math.floor(vp.width);
+      off.height = Math.floor(vp.height);
+      const octx = off.getContext("2d");
+      await p.page.render({ canvasContext: octx, viewport: vp }).promise;
+      watermark(octx, off.width, off.height, stamp, pxWidth / fitW);
+      if (myGen !== gen && p.res) return;           // zoom changed meanwhile; a newer render will follow
+      p.canvas.width = off.width;
+      p.canvas.height = off.height;
+      p.canvas.getContext("2d").drawImage(off, 0, 0);
+      p.res = scale;
+    }
+
+    // Re-render pages near the screen at the new zoom; others when scrolled to.
+    const near = new Set();
+    const nearObs = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        const p = pages[Number(e.target.dataset.page) - 1];
+        if (e.isIntersecting) { near.add(p); renderPage(p, zoom); } else near.delete(p);
+      });
+    }, { rootMargin: "300px 0px" });
+    pages.forEach(p => nearObs.observe(p.canvas));
+
+    function setZoom(z, cx = window.innerWidth / 2, cy = window.innerHeight / 2) {
+      z = Math.min(MAX, Math.max(MIN, Math.round(z * 100) / 100));
+      if (z === zoom) return;
+      const before = inner.getBoundingClientRect();
+      const relX = (cx - before.left) / zoom, relY = (cy - before.top) / zoom;
+      zoom = z;
+      gen++;
+      inner.style.width = `${fitW * zoom}px`;
+      pagesEl.classList.toggle("zoomed", zoom > 1);
+      const after = inner.getBoundingClientRect();
+      pagesEl.scrollLeft += relX * zoom + after.left - cx;
+      window.scrollBy(0, relY * zoom + after.top - cy);
+      $("#zLvl").textContent = `${Math.round(zoom * 100)}%`;
+      clearTimeout(pending);
+      pending = setTimeout(() => near.forEach(p => renderPage(p, zoom)), 220);
+    }
+
+    $("#zIn").onclick = () => setZoom(zoom + 0.5);
+    $("#zOut").onclick = () => setZoom(zoom - 0.5);
+    $("#zLvl").onclick = () => setZoom(1);
+
+    // Pinch to zoom (live preview with a transform, then commit) and double-tap.
+    let pinch = null, lastTap = 0, lastTapX = 0, lastTapY = 0, moved = false;
+    const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    pagesEl.addEventListener("touchstart", e => {
+      if (e.touches.length === 2) {
+        const r = inner.getBoundingClientRect();
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        pinch = { d: dist(e.touches), cx, cy, s: 1 };
+        inner.style.transformOrigin = `${cx - r.left}px ${cy - r.top}px`;
+      } else { moved = false; }
+    }, { passive: true });
+    pagesEl.addEventListener("touchmove", e => {
+      if (pinch && e.touches.length === 2) {
+        e.preventDefault();
+        const s = Math.min(MAX / zoom, Math.max(MIN / zoom, dist(e.touches) / pinch.d));
+        pinch.s = s;
+        inner.style.transform = `scale(${s})`;
+      } else { moved = true; }
+    }, { passive: false });
+    pagesEl.addEventListener("touchend", e => {
+      if (pinch && e.touches.length < 2) {
+        inner.style.transform = "";
+        setZoom(zoom * pinch.s, pinch.cx, pinch.cy);
+        pinch = null;
+        lastTap = 0;
+        return;
+      }
+      if (e.touches.length || moved || !e.changedTouches.length) return;
+      const t = e.changedTouches[0], now = Date.now();
+      if (now - lastTap < 300 && Math.hypot(t.clientX - lastTapX, t.clientY - lastTapY) < 30) {
+        setZoom(zoom > 1 ? 1 : 2.5, t.clientX, t.clientY);
+        lastTap = 0;
+      } else { lastTap = now; lastTapX = t.clientX; lastTapY = t.clientY; }
+    });
+    // Ctrl + mouse wheel / trackpad pinch on a computer.
+    pagesEl.addEventListener("wheel", e => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setZoom(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+    }, { passive: false });
+
     protect();
     trackReading(doc.id, pdf.numPages);
   }
@@ -166,7 +272,7 @@
       ratios.forEach((r, p) => { if (r > bestR) { bestR = r; best = p; } });
       current = best;
       pill.hidden = false;
-      pill.textContent = `Page ${current} of ${pageCount}`;
+      $("#pageNum").textContent = `Page ${current} of ${pageCount}`;
     }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
     document.querySelectorAll("#pages canvas").forEach(c => io.observe(c));
 
