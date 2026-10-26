@@ -73,8 +73,21 @@
   function docStatus(d) {
     if (!d.is_active) return { cls: "off", text: "Link off" };
     if (d.expires_at && new Date(d.expires_at) < new Date()) return { cls: "warn", text: "Expired" };
+    if (d.expires_at) return { cls: "live", text: `Closes in ${timeLeft(d.expires_at)}` };
     return { cls: "live", text: "Sharing" };
   }
+  function timeLeft(iso) {
+    const m = Math.max(0, Math.round((new Date(iso) - Date.now()) / 6e4));
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60), mm = m % 60;
+    if (h < 48) return mm ? `${h}h ${mm}m` : `${h}h`;
+    return `${Math.round(h / 24)} days`;
+  }
+  // 1 to 24 hours, then a few longer choices.
+  const EXPIRY_OPTIONS = [...Array.from({ length: 24 }, (_, i) => [i + 1, `${i + 1} ${i ? "hours" : "hour"}`]),
+    [48, "2 days"], [72, "3 days"], [168, "7 days"], [720, "30 days"]];
+  const expirySelect = (id, selected = 1) =>
+    `<select id="${id}" style="width:auto;min-width:130px">${EXPIRY_OPTIONS.map(([h, l]) => `<option value="${h}"${h === selected ? " selected" : ""}>${l}</option>`).join("")}</select>`;
   function shareLink(id) {
     const u = new URL("./", location.href);
     u.searchParams.set("doc", id);
@@ -179,6 +192,15 @@
         ${kpi("Reading time", fmtDuration(totalSec), `${fmtDuration(weekSec)} in the last 7 days`)}
         ${kpi("Reading now", live.length, live.length ? esc(live.map(s => s.email.split("@")[0]).slice(0, 2).join(", ")) : "Nobody right now")}
       </div>
+      ${S.docs.length ? `<div class="panel" style="margin-bottom:16px">
+        <div class="panel-head"><h2>All links</h2><span class="muted small-text">${linkSummary()}</span></div>
+        <div class="panel-body row" style="justify-content:space-between;gap:16px">
+          <div class="row"><label for="allExp" style="margin:0">Close all links after</label>${expirySelect("allExp", 1)}
+            <button type="button" data-act="expireAll">Set for all documents</button></div>
+          <button type="button" class="primary" data-act="openAll">Turn all links on</button>
+        </div>
+        <p class="hint" style="padding:0 18px 14px;margin:0">Turning all links on also removes every expiry time. People already removed from a document stay removed.</p>
+      </div>` : ""}
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>Reading time per day</h2><span class="muted small-text">Last 14 days, in minutes</span></div>
@@ -202,6 +224,10 @@
     barChart($("#dailyChart"), days.map(d => ({ label: d.label, value: d.value, tip: `${d.label}: ${fmtDuration(d.value * 60)}` })), { fmt: v => v === 0 ? "0" : `${Math.round(v)}m` });
     const revokeBtn = $('[data-act="revokeAll"]', view);
     if (revokeBtn) revokeBtn.onclick = () => revokeAccess(S.docs);
+    const expBtn = $('[data-act="expireAll"]', view);
+    if (expBtn) expBtn.onclick = () => setExpiry(S.docs, Number($("#allExp").value));
+    const openBtn = $('[data-act="openAll"]', view);
+    if (openBtn) openBtn.onclick = () => openLinks(S.docs);
     wireCommon();
   }
 
@@ -288,6 +314,15 @@
           <button type="button" data-act="copy">Copy</button>
           <a class="btn" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(`${d.title}\n${shareLink(d.id)}\n\nOpen it on your Android phone and sign in with Google using the email ID you shared with me.`)}">WhatsApp</a></div>
         <p class="hint">Only the people listed below can open it, and only in the Android app.</p>
+        <div class="row" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--rule)">
+          <label for="docExp" style="margin:0">Close this link after</label>${expirySelect("docExp", 1)}
+          <button type="button" data-act="expireDoc">Set</button>
+          ${d.expires_at ? `<button type="button" data-act="clearExp">Remove expiry</button>` : ""}
+          <span class="spacer"></span>
+          <span class="muted small-text">${d.expires_at
+            ? (new Date(d.expires_at) < new Date() ? `Closed ${esc(fmtDate(d.expires_at))}` : `Closes ${esc(fmtDate(d.expires_at))} (in ${timeLeft(d.expires_at)})`)
+            : "No expiry set"}</span>
+        </div>
       </div></div>
       <div class="kpis">
         ${kpi("Opened by", `${[...readers].filter(e => allowed.includes(e)).length} of ${allowed.length}`, `${allowed.length - [...readers].filter(e => allowed.includes(e)).length} haven't opened it yet`)}
@@ -336,6 +371,13 @@
     act("copy").onclick = async () => { try { await navigator.clipboard.writeText(shareLink(d.id)); toast("Link copied"); } catch { $("#link").select(); } };
     act("edit").onclick = () => openEdit(d);
     act("replace").onclick = () => replacePdf(d);
+    act("expireDoc").onclick = () => setExpiry([d], Number($("#docExp").value));
+    if (act("clearExp")) act("clearExp").onclick = async () => {
+      const { error } = await sb.from("documents").update({ expires_at: null }).eq("id", d.id);
+      if (error) return toast(error.message);
+      toast(d.is_active ? "Expiry removed. The link stays open." : "Expiry removed. Turn the link on to share again.");
+      await refresh();
+    };
     act("toggle").onclick = async () => {
       const { error } = await sb.from("documents").update({ is_active: !d.is_active }).eq("id", d.id);
       if (error) return toast(error.message);
@@ -682,6 +724,55 @@
         if (error) throw error;
         dlg.close(); toast(`${e} blocked`); await refresh();
       });
+  }
+
+  function linkSummary() {
+    const n = { on: 0, closing: 0, off: 0, expired: 0 };
+    S.docs.forEach(d => {
+      const st = docStatus(d).cls;
+      if (st === "off") n.off++; else if (st === "warn") n.expired++; else if (d.expires_at) n.closing++; else n.on++;
+    });
+    return [n.on && `${n.on} open`, n.closing && `${n.closing} closing on a timer`, n.expired && `${n.expired} expired`, n.off && `${n.off} turned off`]
+      .filter(Boolean).join(", ");
+  }
+
+  // Close the given documents' links after N hours (one document, or all).
+  function setExpiry(docs, hours) {
+    const at = new Date(Date.now() + hours * 36e5);
+    const label = EXPIRY_OPTIONS.find(([h]) => h === hours)?.[1] || `${hours} hours`;
+    const one = docs.length === 1;
+    const off = docs.filter(d => !d.is_active).length;
+    confirmDialog({
+      title: one ? `Close "${docs[0].title}" after ${label}?` : `Close all ${docs.length} links after ${label}?`,
+      text: `${one ? "The link stops" : "Every link stops"} working at ${fmtDate(at.toISOString())}. People can read until then. `
+        + (one ? "" : "This replaces any expiry already set. ")
+        + (off ? `${off === 1 && one ? "This link is" : `${off} ${off === 1 ? "link is" : "links are"}`} turned off right now and ${off === 1 ? "stays" : "stay"} off.` : ""),
+      confirm: "Set expiry",
+      run: async () => {
+        const { error } = await sb.from("documents").update({ expires_at: at.toISOString() }).in("id", docs.map(d => d.id));
+        if (error) throw error;
+        toast(one ? `Link closes in ${label}` : `All links close in ${label}`);
+        await refresh();
+      }
+    });
+  }
+
+  // Turn links back on and clear their expiry.
+  function openLinks(docs) {
+    const affected = docs.filter(d => !d.is_active || d.expires_at);
+    if (!affected.length) return toast("All links are already on with no expiry.");
+    confirmDialog({
+      title: "Turn all links on?",
+      text: `${affected.length} ${affected.length === 1 ? "document is" : "documents are"} turned off, expired or on a timer. `
+        + "They'll all be open again with no expiry, for the people on each document's list.",
+      confirm: "Turn all links on",
+      run: async () => {
+        const { error } = await sb.from("documents").update({ is_active: true, expires_at: null }).in("id", affected.map(d => d.id));
+        if (error) throw error;
+        toast("All links are on, with no expiry");
+        await refresh();
+      }
+    });
   }
 
   // Remove every person's access from the given documents (all of them, or one).
