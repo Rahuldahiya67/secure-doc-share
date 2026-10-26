@@ -170,7 +170,8 @@
     }).sort((a, b) => b.secs - a.secs).slice(0, 5);
 
     view.innerHTML = `
-      ${head("Overview", "How your shared documents are being read.", shareBtn)}
+      ${head("Overview", "How your shared documents are being read.",
+        `${S.docs.some(d => d.document_access.length) ? `<button class="danger" type="button" data-act="revokeAll">Remove everyone's access</button>` : ""}${shareBtn}`)}
       ${migrationNote()}
       <div class="kpis">
         ${kpi("Documents sharing", active, `${S.docs.length} in total`)}
@@ -199,6 +200,8 @@
           : emptyState("No documents yet", "Share your first PDF to start tracking who reads it.")}
       </div>`;
     barChart($("#dailyChart"), days.map(d => ({ label: d.label, value: d.value, tip: `${d.label}: ${fmtDuration(d.value * 60)}` })), { fmt: v => v === 0 ? "0" : `${Math.round(v)}m` });
+    const revokeBtn = $('[data-act="revokeAll"]', view);
+    if (revokeBtn) revokeBtn.onclick = () => revokeAccess(S.docs);
     wireCommon();
   }
 
@@ -294,7 +297,8 @@
       </div>
       <div class="grid-2">
         <div class="panel">
-          <div class="panel-head"><h2>People</h2><span class="muted small-text">${allowed.length} allowed</span></div>
+          <div class="panel-head"><h2>People</h2><div class="row"><span class="muted small-text">${allowed.length} allowed</span>
+            ${allowed.length ? `<button class="small danger" type="button" data-act="revokeDoc">Remove everyone</button>` : ""}</div></div>
           ${rows.length ? `<div class="table-wrap"><table class="data">
             <thead><tr><th>Email</th><th>Status</th><th class="num">Time</th><th class="num hide-sm">Furthest page</th><th></th></tr></thead>
             <tbody>${rows.map(r => `<tr>
@@ -338,6 +342,7 @@
       toast(d.is_active ? "Link turned off. Nobody can open it now." : "Link turned on");
       await refresh();
     };
+    if (act("revokeDoc")) act("revokeDoc").onclick = () => revokeAccess([d]);
     act("delete").onclick = () => confirmDialog({
       title: `Delete "${d.title}"?`,
       text: "The PDF, its access list and its reading history are removed for good. The share link stops working.",
@@ -677,6 +682,28 @@
         if (error) throw error;
         dlg.close(); toast(`${e} blocked`); await refresh();
       });
+  }
+
+  // Remove every person's access from the given documents (all of them, or one).
+  function revokeAccess(docs) {
+    const withPeople = docs.filter(d => d.document_access.length);
+    const people = new Set(withPeople.flatMap(d => d.document_access.map(a => a.email)));
+    if (!people.size) return toast("Nobody has access to remove.");
+    const one = docs.length === 1;
+    const live = S.sessions.filter(s => isLive(s) && withPeople.some(d => d.id === s.document_id)).length;
+    confirmDialog({
+      title: one ? `Remove everyone from "${docs[0].title}"?` : "Remove everyone's access to all documents?",
+      text: `${people.size} ${people.size === 1 ? "person loses" : "people lose"} access${one ? "" : ` across ${withPeople.length} ${withPeople.length === 1 ? "document" : "documents"}`}. `
+        + "They can't open anything until you add them again. Documents, links and reading history stay as they are."
+        + (live ? ` ${live} ${live === 1 ? "person is" : "people are"} reading right now; the page they have open stays on their screen until they close it.` : ""),
+      confirm: one ? "Remove everyone" : "Remove all access", danger: true,
+      run: async () => {
+        const { error } = await sb.from("document_access").delete().in("document_id", withPeople.map(d => d.id));
+        if (error) throw error;
+        toast(one ? "Everyone removed from this document" : "Everyone's access removed from all documents");
+        await refresh();
+      }
+    });
   }
 
   function confirmDialog({ title, text, confirm, danger, run }) {
