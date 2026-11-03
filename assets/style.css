@@ -518,3 +518,19 @@ code.upi { font-size: 14px; padding: 4px 8px; overflow-wrap: anywhere; }
 .stat-row span { display: block; color: var(--muted); font-size: 12px; }
 .stat-row strong { font-size: 18px; }
 .avatar.lg { width: 48px; height: 48px; font-size: 16px; flex: none; }
+.due { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius); background: var(--warn-soft); color: var(--ink); margin: 0 0 14px; font-size: 14px; }
+.due svg { width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--warn); }
+.due.today { background: var(--alert-soft); }
+.due.today svg { color: var(--alert); }
+.due.ok { background: var(--seal-soft); }
+.due.ok svg { color: var(--seal); }
+
+/* View-only admins: hide controls that change things (the database refuses them anyway). */
+.ro-banner { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-radius: var(--radius); background: var(--warn-soft); font-size: 14px; margin-bottom: 14px; }
+.ro-banner svg { width: 16px; height: 16px; }
+body.readonly .main button:not([data-act="csv"]):not([data-act="print"]):not([data-act="copy"]):not(.zbtn),
+body.readonly .main [data-act="new"], body.readonly .main .linkbox + .hint + .row,
+body.readonly .main textarea#addEmails, body.readonly .main label[for="addEmails"] { display: none !important; }
+body.readonly .main #dGroup, body.readonly .main #docExp, body.readonly .main #allExp, body.readonly .main #gDoc, body.readonly .main #gAdd,
+body.readonly .main label[for="docExp"], body.readonly .main label[for="allExp"], body.readonly .main label[for="gAdd"],
+body.readonly .main [data-group], body.readonly .main #payDay, body.readonly .main #expPct { display: none !important; }

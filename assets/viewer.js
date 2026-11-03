@@ -69,12 +69,16 @@
         <a class="tile" href="?view=pay">
           <span class="tile-icon">${icon("upload")}</span>
           <span class="tile-text"><span class="t">Submit a payment</span>
-          <span class="s">Send your earnings, payment and screenshots for review.</span></span>
+          <span class="s" id="payTileSub">Send your earnings, payment and screenshots for review.</span></span>
         </a>
         ${tile("?view=me", "user", "My account", "Your documents, reading time, payments and requests.")}
         ${tile("?view=help", "help", "Help", "Answers to common questions.")}
         ${tile("?view=feedback", "chat", "Send feedback", "Ideas, problems or questions for the owner.")}
       </div>`;
+    window.Payments?.weekStatus?.(user).then(w => {
+      const el = $("#payTileSub"); if (!el) return;
+      el.innerHTML = w.paid ? "Done for this week. Thank you!" : `Due every ${esc(w.cycle.dayName)}. This week's is due <strong>${w.dueToday ? "today" : esc(w.cycle.label)}</strong>.`;
+    }).catch(() => {});
   }
 
   function linkify(text) {
@@ -217,6 +221,35 @@
       <ul class="doc-list">${data.filter(d => (d.folder || "") === f).map(item).join("")}</ul>`).join("")}</div>`;
   }
 
+  // Same ID the app reports for this phone; a saved random ID on older app versions.
+  function getDeviceId() {
+    try {
+      const hw = typeof window.SecureDocApp?.deviceId === "function" ? window.SecureDocApp.deviceId() : "";
+      if (hw) return `a:${hw}`;
+      let id = localStorage.getItem("deviceId") || "";
+      if (!id) { id = crypto.randomUUID(); localStorage.setItem("deviceId", id); }
+      return id;
+    } catch (_) { return ""; }
+  }
+
+  async function phoneLocked(doc) {
+    const { data } = await sb.from("device_requests").select("status,created_at").order("created_at", { ascending: false }).limit(1);
+    const last = data?.[0];
+    const waiting = last?.status === "pending";
+    root.innerHTML = `<div class="card narrow"><h2>This account is linked to another phone</h2>
+      <p class="sub">To keep documents safe, each account reads on one phone. ${waiting ? "Your request to use this phone is waiting for the owner's approval." : "Ask the owner to switch your account to this phone."}</p>
+      ${waiting ? `<button class="full" type="button" id="reAsk">Send the request again</button>` : `<button class="primary full" type="button" id="reAsk">Ask to use this phone</button>`}
+      <p class="msg" id="askMsg" role="status"></p>
+      <a class="btn full" style="margin-top:10px" href="?view=docs">Back to documents</a></div>`;
+    $("#reAsk").onclick = async () => {
+      const { error } = await sb.rpc("request_device_change", { device: getDeviceId(), label: deviceLabel() });
+      const m = $("#askMsg");
+      if (error) { m.className = "msg err"; m.textContent = "Couldn't send the request. Please try again."; return; }
+      m.className = "msg ok"; m.textContent = "Request sent. You'll be able to open documents here once it's approved.";
+      $("#reAsk").disabled = true;
+    };
+  }
+
   function viewUsed(doc) {
     root.innerHTML = `<div class="card narrow"><h2>Already viewed</h2>
       <p class="sub">"${esc(doc.title)}" could be opened only once, and you've used that view. Ask the owner if you need to see it again.</p>
@@ -296,7 +329,11 @@
     // Ask the database for a short-lived grant; it checks the email list and the app key.
     let appKey = "";
     try { appKey = window.SecureDocApp.getKey(); } catch (_) {}
-    const { data: path, error: gErr } = await sb.rpc("start_view", { doc: doc.id, app_key: appKey });
+    let { data: path, error: gErr } = await sb.rpc("start_view", { doc: doc.id, app_key: appKey, device: getDeviceId(), label: deviceLabel() });
+    // Before 009_security.sql is run, the database only knows the two-argument version.
+    if (gErr && (gErr.code === "PGRST202" || /Could not find the function/i.test(gErr.message))) {
+      ({ data: path, error: gErr } = await sb.rpc("start_view", { doc: doc.id, app_key: appKey }));
+    }
     if (gErr) {
       if (/app_required/.test(gErr.message)) {
         root.innerHTML = `<div class="card narrow"><h2>Update the app</h2>
@@ -305,6 +342,7 @@
         return;
       }
       if (/view_used/.test(gErr.message)) return viewUsed(doc);
+      if (/device_locked/.test(gErr.message)) return phoneLocked(doc);
       return noAccess();
     }
 
@@ -471,15 +509,7 @@
     }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
     document.querySelectorAll("#pages canvas").forEach(c => io.observe(c));
 
-    let deviceId = "";
-    try {
-      const hw = typeof window.SecureDocApp?.deviceId === "function" ? window.SecureDocApp.deviceId() : "";
-      if (hw) deviceId = `a:${hw}`;
-      else {
-        deviceId = localStorage.getItem("deviceId") || "";
-        if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem("deviceId", deviceId); }
-      }
-    } catch (_) {}
+    const deviceId = getDeviceId();
     const label = deviceLabel();
 
     const { data: sid, error } = await sb.rpc("begin_session", { doc: documentId, device: deviceId, label, pages: pageCount });

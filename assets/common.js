@@ -233,7 +233,18 @@
 
   checkAppUpdate();
 
+  // Weekly payment cycle that ends on the payment day (0 = Sunday ... 3 = Wednesday).
+  const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  function payCycle(day = 3, date = new Date()) {
+    const end = new Date(date); end.setHours(23, 59, 59, 999);
+    end.setDate(end.getDate() + ((day - end.getDay() + 7) % 7));
+    const start = new Date(end); start.setDate(start.getDate() - 6); start.setHours(0, 0, 0, 0);
+    const key = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`;
+    return { start, end, key, dayName: DAY_NAMES[day], label: end.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) };
+  }
+
   window.App = {
+    payCycle, DAY_NAMES,
     sb, cfg, configured, inApp, $, $$, esc, icon, brandHTML, fmtDuration, timeAgo, fmtDate, initials, toast,
     renderSignIn, renderNotConfigured, renderHeader, getUser, returnUrl, signOut
   };

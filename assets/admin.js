@@ -32,7 +32,7 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins] = await Promise.all([
       sb.from("documents")
         .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -43,7 +43,7 @@
       sb.from("payment_submissions").select("*").order("created_at", { ascending: false }).limit(3000),
       sb.from("payment_accounts").select("*").order("sort_order").order("created_at"),
       sb.from("app_settings").select("key,value"),
-      sb.from("audit_log").select("*").order("at", { ascending: false }).limit(300),
+      sb.from("audit_log").select("*").order("at", { ascending: false }).limit(1000),
       sb.rpc("is_owner"),
       sb.from("people").select("*"),
       sb.from("groups").select("id,name,description,created_at,group_members(email,added_at),group_documents(document_id)").order("name"),
@@ -51,7 +51,11 @@
       sb.from("document_views").select("*"),
       sb.from("announcements").select("*").order("pinned", { ascending: false }).order("created_at", { ascending: false }),
       sb.from("faqs").select("*").order("sort_order").order("updated_at"),
-      sb.from("feedback").select("*").order("created_at", { ascending: false }).limit(500)
+      sb.from("feedback").select("*").order("created_at", { ascending: false }).limit(500),
+      sb.rpc("my_role"),
+      sb.from("device_locks").select("*"),
+      sb.from("device_requests").select("*").order("created_at", { ascending: false }).limit(300),
+      sb.from("admins").select("*").order("email")
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -72,8 +76,14 @@
     S.docViews = docViews.error ? [] : docViews.data || [];
     S.portalV1 = !anns.error && !faqs.error && !feedback.error;
     S.announcements = anns.data || []; S.faqs = faqs.data || []; S.feedback = feedback.data || [];
+    S.securityV1 = !role.error && !locks.error && !devReqs.error;
+    S.role = role.error ? (S.isOwner ? "owner" : "admin") : role.data || "admin";
+    S.deviceLocks = locks.data || []; S.deviceRequests = devReqs.data || []; S.admins = admins.data || [];
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
+    const pd = (settings.data || []).find(s => s.key === "payment_day");
+    S.payDay = pd && Number(pd.value) >= 0 && Number(pd.value) <= 6 ? Number(pd.value) : 3; // Wednesday
+    S.deviceLock = (settings.data || []).find(s => s.key === "device_lock")?.value === true;
     if (S.accounts.some(x => x.qr_path)) {
       const { data: urls } = await sb.storage.from("payment-qr").createSignedUrls(S.accounts.filter(x => x.qr_path).map(x => x.qr_path), 3600);
       (urls || []).forEach(u => { const x = S.accounts.find(y => y.qr_path === u.path); if (x) x.qrUrl = u.signedUrl; });
@@ -107,6 +117,8 @@
     S.groups.forEach(g => g.group_members.forEach(m => person(m.email)));
     S.requests.forEach(r => person(r.email));
     S.feedback.forEach(f => person(f.email));
+    D.alerts = computeAlerts();
+    document.body.classList.toggle("readonly", S.role === "viewer");
   }
   function person(email) {
     if (!D.people.has(email)) D.people.set(email, { docs: new Set(), opened: new Set() });
@@ -178,6 +190,7 @@
     ["activity", "Activity", "activity"],
     ["payments", "Payments", "wallet"],
     ["messages", "Messages", "chat"],
+    ["security", "Security", "shield"],
     ["blocked", "Blocked", "block"]
   ];
 
@@ -208,15 +221,18 @@
     $('[data-count="blocked"]').textContent = S.blocked.length || "";
     const pendingPays = S.payments.filter(p => p.status === "pending").length;
     $('[data-count="payments"]').textContent = pendingPays ? `${pendingPays} new` : "";
+    const secCount = D.alerts.filter(a => a.level === "high").length + S.deviceRequests.filter(r => r.status === "pending").length;
+    $('[data-count="security"]').textContent = secCount || "";
     const newFb = S.feedback.filter(f => f.status === "new").length;
     $('[data-count="messages"]').textContent = newFb ? `${newFb} new` : "";
 
-    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, statement, messages, activity, blocked, payments, payment: paymentDetail };
+    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, statement, messages, security, activity, blocked, payments, payment: paymentDetail };
     (pages[name] || overview)(arg, arg2);
     if (!silent) { window.scrollTo(0, 0); }
   }
 
   function head(title, sub, actions = "", back = "") {
+    if (S.role === "viewer") back = `<div class="ro-banner">${icon("lock")} You have view-only access. Ask the owner if you need to change something.</div>${back}`;
     return `${back}<div class="page-head"><div><h1>${esc(title)}</h1>${sub ? `<p class="sub">${sub}</p>` : ""}</div><div class="row">${actions}</div></div>`;
   }
   const shareBtn = `<button class="primary" type="button" data-act="new">${icon("upload")}Share a document</button>`;
@@ -718,6 +734,11 @@
                 <td class="num">${inr(p.amount_earned)}</td><td class="num">${inr(p.amount_sent)}</td><td>${payTag(p.status)}</td></tr>`).join("")}</tbody></table></div>`
               : emptyState("No payments", "Submissions from this person appear here.")}
           </div>
+          ${S.securityV1 ? (() => { const l = S.deviceLocks.find(x => x.email === email), rq = S.deviceRequests.find(x => x.email === email && x.status === "pending");
+            return `<div class="panel section-gap"><div class="panel-head"><h2>Phone lock</h2>${S.deviceLock ? "" : `<span class="muted small-text">Lock is off</span>`}</div>
+              <div class="panel-body small-text">${l ? `Locked to <strong>${esc(l.device_label || "Android phone")}</strong> since ${esc(fmtDate(l.locked_at))}.` : "No phone locked yet."}
+              ${rq ? `<p style="margin:8px 0 0"><span class="tag warn">Waiting</span> Wants to switch to ${esc(rq.device_label || "a new phone")}. <a href="#security/phones">Review</a></p>` : ""}
+              ${l ? `<div class="row" style="margin-top:10px"><button class="small" type="button" data-act="resetPhone">Reset phone lock</button></div>` : ""}</div></div>`; })() : ""}
           <div class="panel section-gap">
             <div class="panel-head"><h2>Devices</h2></div>
             ${devices.size ? `<ul class="feed">${[...devices.values()].map(list => `
@@ -748,6 +769,11 @@
         toast("Access removed"); await refresh();
       }
     });
+    if (act("resetPhone")) act("resetPhone").onclick = async () => {
+      const { error } = await sb.from("device_locks").delete().eq("email", email);
+      if (error) return toast(error.message);
+      toast("Phone lock reset. Their next phone becomes the locked one."); await refresh();
+    };
     act("saveProfile").onclick = async () => {
       const tags = [...new Set($("#prTags").value.split(",").map(t => t.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
       const { error } = await sb.from("people").upsert({
@@ -1158,6 +1184,185 @@
   }
 
   // ---------------------------------------------------------------
+  // Security: alerts, one-phone lock, admins, full change log
+  // ---------------------------------------------------------------
+  const SEC_TABS = [["", "Alerts"], ["phones", "Phone lock"], ["admins", "Admins"], ["log", "Change log"]];
+  const secTabs = active => {
+    const pend = S.deviceRequests.filter(r => r.status === "pending").length;
+    return `<nav class="tabs" aria-label="Security">${SEC_TABS.map(([k, l]) =>
+      `<a href="#security${k ? "/" + k : ""}" ${k === active ? 'aria-current="page"' : ""}>${l}${k === "phones" && pend ? ` (${pend})` : k === "" && D.alerts.length ? ` (${D.alerts.length})` : ""}</a>`).join("")}</nav>`;
+  };
+  const secNote = () => S.securityV1 ? "" : `<div class="notice" style="margin-bottom:16px">Run <code>supabase/009_security.sql</code> to switch on view-only admins, the phone lock and the full change log.</div>`;
+  function security(tab = "") {
+    ({ "": alertsPage, phones: phonesPage, admins: adminsPage, log: fullLog }[tab] || alertsPage)();
+  }
+
+  // Patterns worth a look, worked out from reading sessions and payments.
+  function computeAlerts() {
+    const out = [];
+    const since = Date.now() - 14 * 864e5;
+    const recent = S.sessions.filter(s => new Date(s.started_at) > since && s.device_id);
+    // One phone, several accounts: likely a shared or borrowed account.
+    groupBy(recent, s => s.device_id).forEach((list, dev) => {
+      const emails = [...new Set(list.map(s => s.email))];
+      if (emails.length > 1) out.push({ level: "high", kind: "Shared phone", emails, text: `${emails.length} accounts read on the same phone (${list[0].device_label || "Android"})`, when: list[0].last_seen_at });
+    });
+    // One account, many phones.
+    groupBy(recent, s => s.email).forEach((list, email) => {
+      const devs = new Set(list.map(s => s.device_id));
+      if (devs.size >= 3) out.push({ level: "med", kind: "Many phones", emails: [email], text: `Used ${devs.size} different phones in 2 weeks`, when: list[0].last_seen_at });
+      // Two phones at the same time.
+      const sorted = list.slice().sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
+      for (let i = 1; i < sorted.length; i++) {
+        const a = sorted[i - 1], b = sorted[i];
+        if (a.device_id !== b.device_id && new Date(b.started_at) < new Date(a.last_seen_at)) {
+          out.push({ level: "high", kind: "Two phones at once", emails: [email], text: `Reading on ${a.device_label || "one phone"} and ${b.device_label || "another"} at the same time`, when: b.started_at });
+          break;
+        }
+      }
+      // Very long sessions in the middle of the night (local time).
+      const night = list.filter(s => { const h = new Date(s.started_at).getHours(); return h >= 1 && h < 5 && s.seconds > 1800; });
+      if (night.length >= 3) out.push({ level: "low", kind: "Night reading", emails: [email], text: `${night.length} long sessions between 1 and 5 am`, when: night[0].started_at });
+    });
+    // Blocked people who still have sessions after being blocked.
+    S.blocked.forEach(b => {
+      const after = (D.sessByEmail.get(b.email) || []).filter(s => new Date(s.last_seen_at) > new Date(b.blocked_at));
+      if (after.length) out.push({ level: "high", kind: "Blocked but active", emails: [b.email], text: "Still reading after being blocked; check their access", when: after[0].last_seen_at });
+    });
+    // Payments with reused UTRs or matching screenshots.
+    S.payments.filter(p => p.status === "pending").forEach(p => {
+      const f = payFlags(p).filter(x => !x.cls);
+      if (f.length) out.push({ level: "med", kind: "Payment check", emails: [p.email], text: `${inr(p.amount_sent)} payment: ${f.map(x => x.text).join(", ")}`, when: p.created_at, href: `payment/${p.id}` });
+    });
+    const rank = { high: 0, med: 1, low: 2 };
+    return out.sort((a, b) => rank[a.level] - rank[b.level] || new Date(b.when) - new Date(a.when));
+  }
+
+  function alertsPage() {
+    const A = D.alerts;
+    const lvl = { high: ["off", "Check now"], med: ["warn", "Worth a look"], low: ["plain", "FYI"] };
+    view.innerHTML = `
+      ${head("Security", "Unusual patterns from the last 2 weeks of reading and from pending payments.")}
+      ${secTabs("")}${secNote()}
+      <div class="panel">${A.length ? `<div class="table-wrap"><table class="data"><tbody>${A.map(a => `<tr${a.href ? ` class="clickable" tabindex="0" data-href="${a.href}"` : ""}>
+        <td><span class="tag ${lvl[a.level][0]}">${lvl[a.level][1]}</span></td>
+        <td><div class="cell-title">${esc(a.kind)}</div><div class="cell-sub">${esc(a.text)}</div></td>
+        <td>${a.emails.slice(0, 4).map(e => `<a href="#person/${encodeURIComponent(e)}">${esc(nameOf(e))}</a>`).join("<br>")}${a.emails.length > 4 ? `<br><span class="muted small-text">+${a.emails.length - 4} more</span>` : ""}</td>
+        <td class="muted hide-sm">${esc(timeAgo(a.when))}</td></tr>`).join("")}</tbody></table></div>`
+        : emptyState("Nothing unusual", "Shared phones, two phones at once, blocked people still reading and suspicious payments show up here.")}</div>
+      <p class="hint">Alerts are hints, not proof. Open the person to see their phones and sessions before you block anyone.</p>`;
+    wireCommon();
+  }
+
+  function phonesPage() {
+    const pend = S.deviceRequests.filter(r => r.status === "pending");
+    const lockLabel = e => S.deviceLocks.find(l => l.email === e);
+    view.innerHTML = `
+      ${head("Security", "Each person can read on one phone. A new phone needs your approval.")}
+      ${secTabs("phones")}${secNote()}
+      <div class="panel" style="margin-bottom:16px"><div class="panel-body row" style="justify-content:space-between">
+        <div><strong>One-phone lock is ${S.deviceLock ? "on" : "off"}</strong>
+          <p class="hint" style="margin:4px 0 0">${S.deviceLock ? "The first phone someone opens a document on becomes their phone. Admins are never locked." : "Anyone with access can read on any phone with the app."}</p></div>
+        ${S.isOwner && S.securityV1 ? `<button type="button" class="${S.deviceLock ? "" : "primary"}" data-act="toggleLock">${S.deviceLock ? "Turn off" : "Turn on"}</button>` : ""}
+      </div></div>
+      <div class="panel">
+        <div class="panel-head"><h2>Asking to use a new phone</h2><span class="muted small-text">${pend.length}</span></div>
+        ${pend.length ? `<div class="table-wrap"><table class="data"><tbody>${pend.map(r => { const l = lockLabel(r.email); return `<tr>
+          <td><a class="cell-title" href="#person/${encodeURIComponent(r.email)}">${esc(nameOf(r.email))}</a><div class="cell-sub">${esc(r.email)}, ${esc(timeAgo(r.created_at))}</div></td>
+          <td><div>${esc(r.device_label || "Android phone")}</div><div class="cell-sub">Now locked to ${esc(l?.device_label || "another phone")}</div></td>
+          <td class="num"><div class="row end"><button class="small primary" type="button" data-dev="${r.id}" data-to="approved">Allow new phone</button>
+            <button class="small" type="button" data-dev="${r.id}" data-to="declined">Decline</button></div></td></tr>`; }).join("")}</tbody></table></div>`
+          : emptyState("No requests", "When a locked person opens a document on a different phone, they can ask here.")}
+      </div>
+      <div class="panel section-gap">
+        <div class="panel-head"><h2>Locked phones</h2><span class="muted small-text">${S.deviceLocks.length}</span></div>
+        ${S.deviceLocks.length ? `<div class="table-wrap"><table class="data"><tbody>${S.deviceLocks.slice().sort((a, b) => new Date(b.locked_at) - new Date(a.locked_at)).map(l => `<tr>
+          <td><a class="cell-title" href="#person/${encodeURIComponent(l.email)}">${esc(nameOf(l.email))}</a><div class="cell-sub">${esc(l.email)}</div></td>
+          <td>${esc(l.device_label || "Android phone")}<div class="cell-sub">since ${esc(fmtDate(l.locked_at))}</div></td>
+          <td class="num"><button class="small ghost" type="button" data-unlock="${esc(l.email)}">Reset</button></td></tr>`).join("")}</tbody></table></div>`
+          : emptyState("No phones locked yet", S.deviceLock ? "Phones get locked the first time each person opens a document." : "Turn the lock on to start.")}
+      </div>`;
+    const t = $('[data-act="toggleLock"]');
+    if (t) t.onclick = () => confirmDialog({
+      title: S.deviceLock ? "Turn off the one-phone lock?" : "Turn on the one-phone lock?",
+      text: S.deviceLock ? "People can read on any phone again. Saved phones are kept in case you turn it back on." : "Each person's next document opens their phone lock. If they switch phones later, they ask you first. People on app version 4 or older will be asked to update.",
+      confirm: S.deviceLock ? "Turn off" : "Turn on",
+      run: async () => {
+        const { error } = await sb.from("app_settings").upsert({ key: "device_lock", value: !S.deviceLock, updated_at: new Date().toISOString() });
+        if (error) throw error; toast(S.deviceLock ? "Phone lock off" : "Phone lock on"); await refresh();
+      }
+    });
+    $$("[data-dev]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("device_requests").update({ status: b.dataset.to, decided_by: user.email, decided_at: new Date().toISOString() }).eq("id", b.dataset.dev);
+      if (error) return toast(error.message);
+      toast(b.dataset.to === "approved" ? "New phone allowed. The old phone can't open documents now." : "Request declined"); await refresh();
+    });
+    $$("[data-unlock]", view).forEach(b => b.onclick = () => confirmDialog({
+      title: `Reset ${b.dataset.unlock}'s phone?`, text: "The next phone they open a document on becomes their phone.", confirm: "Reset",
+      run: async () => { const { error } = await sb.from("device_locks").delete().eq("email", b.dataset.unlock); if (error) throw error; toast("Phone lock reset"); await refresh(); }
+    }));
+    wireCommon();
+  }
+
+  const ROLE = { owner: "Owner", admin: "Admin", viewer: "View only" };
+  function adminsPage() {
+    view.innerHTML = `
+      ${head("Security", "Who can open this dashboard.", S.isOwner && S.securityV1 ? `<button class="primary" type="button" data-act="addAdmin">Add an admin</button>` : "")}
+      ${secTabs("admins")}${secNote()}
+      <div class="panel">${S.admins.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Email</th><th>Role</th><th></th></tr></thead><tbody>${S.admins.map(a => `<tr>
+        <td><div class="cell-title">${esc(a.email)}</div>${a.email === user.email ? `<div class="cell-sub">You</div>` : ""}</td>
+        <td>${S.isOwner && a.email !== user.email && S.securityV1 ? `<select data-role="${esc(a.email)}" style="width:auto">${Object.entries(ROLE).map(([k, l]) => `<option value="${k}" ${a.role === k ? "selected" : ""}>${l}</option>`).join("")}</select>`
+          : `<span class="tag ${a.role === "viewer" ? "plain" : "live"}">${ROLE[a.role] || a.role}</span>`}</td>
+        <td class="num">${S.isOwner && a.email !== user.email && S.securityV1 ? `<button class="small ghost" type="button" data-rmadmin="${esc(a.email)}">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+        : emptyState("Admins", "Only the owner can see the full list.")}</div>
+      <div class="panel section-gap"><div class="panel-body small-text">
+        <p style="margin:0 0 6px"><strong>Owner</strong>: everything, including payment accounts, settings and admins.</p>
+        <p style="margin:0 0 6px"><strong>Admin</strong>: share documents, manage people, review payments and reply to feedback.</p>
+        <p style="margin:0"><strong>View only</strong>: can see the dashboard but can't change anything. The database refuses their changes.</p>
+      </div></div>`;
+    const add = $('[data-act="addAdmin"]');
+    if (add) add.onclick = () => openDialog(`
+      <div class="dlg-head"><h2>Add an admin</h2><p class="sub" style="margin:6px 0 0">They sign in at the admin page with this Google account.</p></div>
+      <div class="dlg-body"><label for="adEmail">Email</label><input id="adEmail" type="email" required>
+        <label for="adRole">Role</label><select id="adRole"><option value="viewer">View only</option><option value="admin">Admin</option></select>
+        <div class="msg dlg-msg" role="status"></div></div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Add</button></div>`,
+      async () => {
+        const { error } = await sb.from("admins").insert({ email: $("#adEmail").value.trim().toLowerCase(), role: $("#adRole").value });
+        if (error) throw new Error(/duplicate/.test(error.message) ? "That email is already an admin." : /bad_email/.test(error.message) ? "Check the email." : error.message);
+        dlg.close(); toast("Admin added"); await refresh();
+      });
+    $$("[data-role]", view).forEach(sel => sel.onchange = async () => {
+      const { error } = await sb.from("admins").update({ role: sel.value }).eq("email", sel.dataset.role);
+      if (error) { toast(/last_owner/.test(error.message) ? "There must always be one owner." : error.message); return refresh(); }
+      toast("Role changed"); await refresh();
+    });
+    $$("[data-rmadmin]", view).forEach(b => b.onclick = () => confirmDialog({
+      title: `Remove ${b.dataset.rmadmin}?`, text: "They lose access to this dashboard straight away.", confirm: "Remove", danger: true,
+      run: async () => { const { error } = await sb.from("admins").delete().eq("email", b.dataset.rmadmin); if (error) throw new Error(/last_owner/.test(error.message) ? "There must always be one owner." : error.message); toast("Admin removed"); await refresh(); }
+    }));
+  }
+
+  function fullLog(filter = "") {
+    const AREAS = { "": "Everything", payments: "Payments", docs: "Documents & access", people: "People & groups", messages: "Messages", security: "Admins & security" };
+    const area = t => /^payment|app_settings/.test(t) ? "payments" : /^document|blocked/.test(t) ? "docs" : /^people|group|access_requests/.test(t) ? "people" : /^announce|faq|feedback/.test(t) ? "messages" : "security";
+    const L = S.audit.filter(r => !filter || area(r.table_name) === filter);
+    view.innerHTML = `
+      ${head("Security", "Every change made from the dashboard. Recorded by the database; nobody can edit or delete it.", `<button type="button" data-act="csv">Download CSV</button>`)}
+      ${secTabs("log")}${secNote()}
+      <div class="panel">
+        <div class="panel-head"><select id="logArea" style="width:auto" aria-label="Area">${Object.entries(AREAS).map(([k, l]) => `<option value="${k}" ${k === filter ? "selected" : ""}>${l}</option>`).join("")}</select>
+          <span class="muted small-text">Latest ${S.audit.length}</span></div>
+        ${L.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>When</th><th>Who</th><th>What happened</th></tr></thead>
+        <tbody>${L.map(r => `<tr><td class="muted">${esc(fmtDate(r.at))}</td><td>${esc(r.actor)}</td><td style="white-space:normal">${esc(auditSummary(r))}</td></tr>`).join("")}</tbody></table></div>`
+          : emptyState("Nothing recorded yet", "Changes appear here as they happen.")}
+      </div>`;
+    $("#logArea").onchange = e => fullLog(e.target.value);
+    $('[data-act="csv"]').onclick = () => downloadCsv([["When", "Who", "Table", "Action", "Summary"], ...L.map(r => [r.at, r.actor, r.table_name, r.action, auditSummary(r)])], "change-log.csv");
+  }
+
+  // ---------------------------------------------------------------
   // Activity
   // ---------------------------------------------------------------
   function activity() {
@@ -1233,8 +1438,10 @@
   const PAID_VIA = { gpay: "Google Pay", phonepe: "PhonePe", paytm: "Paytm", upi: "Other UPI app", qr: "Scanned QR", bank: "Bank transfer", other: "Other" };
   const payTag = s => { const [c, t] = PAY_STATUS[s] || PAY_STATUS.pending; return `<span class="tag ${c}">${t}</span>`; };
   const payDay = p => new Date(p.payout_date ? `${p.payout_date}T12:00:00` : p.created_at);
-  function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
-  const weekKey = d => weekStart(d).toISOString().slice(0, 10);
+  // Weeks run up to the payment day (Wednesday unless the owner changes it).
+  const cycle = d => window.App.payCycle(S.payDay, d);
+  function weekStart(d) { return cycle(d).start; }
+  const weekKey = d => cycle(d).key;
 
   // Things worth a second look on a submission.
   function payFlags(p) {
@@ -1249,7 +1456,19 @@
     const mine = [p.earnings_hash, p.referral_hash, p.payment_hash].filter(Boolean);
     const twin = mine.length && S.payments.find(x => x.id !== p.id && [x.earnings_hash, x.referral_hash, x.payment_hash].some(h => h && mine.includes(h)));
     if (twin) flags.push({ cls: "", text: twin.email === p.email ? "Same screenshot as an earlier submission" : `Same screenshot as ${twin.name}` });
+    // Looks the same even if re-saved, cropped slightly or recompressed.
+    const ph = [p.earnings_phash, p.referral_phash, p.payment_phash].filter(Boolean);
+    if (!twin && ph.length) {
+      const near = S.payments.find(x => x.id !== p.id && new Date(x.created_at) < new Date(p.created_at)
+        && [x.earnings_phash, x.referral_phash, x.payment_phash].some(h => h && ph.some(m => hamming(m, h) <= 4)));
+      if (near) flags.push({ cls: "", text: near.email === p.email ? "Screenshot looks like an earlier one" : `Screenshot looks like ${near.name}'s` });
+    }
     return flags;
+  }
+  function hamming(a, b) {
+    let d = 0;
+    for (let i = 0; i < 16; i += 4) { let x = parseInt(a.slice(i, i + 4), 16) ^ parseInt(b.slice(i, i + 4), 16); while (x) { d += x & 1; x >>= 1; } }
+    return d;
   }
   const flagsHTML = p => { const f = payFlags(p); return f.length ? `<div class="flags">${f.map(x => `<span class="flag ${x.cls}">${esc(x.text)}</span>`).join("")}</div>` : ""; };
 
@@ -1333,7 +1552,7 @@
 
     const weeks = [];
     const thisWeek = weekStart(new Date());
-    for (let i = 11; i >= 0; i--) { const d = new Date(thisWeek); d.setDate(d.getDate() - i * 7); weeks.push({ key: d.toISOString().slice(0, 10), d, v: 0 }); }
+    for (let i = 11; i >= 0; i--) { const d = new Date(thisWeek); d.setDate(d.getDate() - i * 7); const c = cycle(d); weeks.push({ key: c.key, d: c.end, v: 0 }); }
     live.forEach(p => { const w = weeks.find(x => x.key === weekKey(payDay(p))); if (w) w.v += Number(p.amount_sent); });
     const months = [];
     for (let i = 11; i >= 0; i--) { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); months.push({ key: d.toISOString().slice(0, 7), d, v: 0, e: 0 }); }
@@ -1384,46 +1603,73 @@
       ? months.map(m => ({ label: m.d.toLocaleDateString(undefined, { month: "short" }), value: m.v, tip: `${m.d.toLocaleDateString(undefined, { month: "long", year: "numeric" })}: ${inr(m.v)} paid of ${inr(m.e)} earned` }))
       : null;
     if (series) barChart($("#weekChart"), series, { fmt: v => v === 0 ? "0" : v >= 1000 ? `₹${Math.round(v / 100) / 10}k` : `₹${Math.round(v)}`, height: 200 });
-    else barChart($("#weekChart"), weeks.map(w => ({ label: w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), value: w.v, tip: `Week of ${w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}: ${inr(w.v)}` })),
+    else barChart($("#weekChart"), weeks.map(w => ({ label: w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), value: w.v, tip: `Week to ${w.d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}: ${inr(w.v)}` })),
       { fmt: v => v === 0 ? "0" : v >= 1000 ? `₹${Math.round(v / 100) / 10}k` : `₹${Math.round(v)}`, height: 200 });
   }
 
   function payMissing() {
+    // A submission counts for the week in which it was sent; each week ends on the payment day.
     const live = S.payments.filter(p => p.status !== "rejected");
-    const thisKey = weekKey(new Date());
-    const last = new Date(weekStart(new Date())); last.setDate(last.getDate() - 7);
-    const lastKey = last.toISOString().slice(0, 10);
-    const byEmail = groupBy(live, p => p.email);
-    const lastWeekOnly = [...byEmail.entries()].filter(([, l]) => l.some(p => weekKey(payDay(p)) === lastKey) && !l.some(p => weekKey(payDay(p)) === thisKey))
-      .map(([email, l]) => ({ email, name: l[0].name, last: l[0] }));
-    const everPaid = new Set(S.payments.map(p => p.email));
-    const never = [...D.people.keys()].filter(e => !everPaid.has(e) && !D.blocked.has(e)).sort();
-    const reminder = `Hi, a reminder to submit this week's payment in the Secure Doc Share app (Submit a payment).`;
+    const now = cycle(new Date());
+    const prevDay = new Date(now.start); prevDay.setDate(prevDay.getDate() - 1);
+    const prev = cycle(prevDay);
+    const keysBack = n => Array.from({ length: n }, (_, i) => { const d = new Date(prev.start); d.setDate(d.getDate() - 1 - i * 7); return cycle(d).key; });
+    const earlier = new Set(keysBack(4)); // the 4 weeks before last week
+    const sentIn = new Map(); // email -> Set(cycle keys)
+    live.forEach(p => { const k = cycle(new Date(p.created_at)).key; if (!sentIn.has(p.email)) sentIn.set(p.email, new Set()); sentIn.get(p.email).add(k); });
+    const nameFor = email => S.payments.find(p => p.email === email)?.name || nameOf(email);
+    const lastPaid = email => S.payments.find(p => p.email === email && p.status !== "rejected");
+    const regulars = [...sentIn.keys()].filter(e => !D.blocked.has(e));
+    const missedLast = regulars.filter(e => !sentIn.get(e).has(prev.key) && [...sentIn.get(e)].some(k => earlier.has(k)));
+    const dueNow = regulars.filter(e => !sentIn.get(e).has(now.key) && (sentIn.get(e).has(prev.key) || [...sentIn.get(e)].some(k => earlier.has(k))));
+    const paidNow = regulars.filter(e => sentIn.get(e).has(now.key));
+    const never = [...D.people.keys()].filter(e => !sentIn.has(e) && !D.blocked.has(e) && !S.payments.some(p => p.email === e)).sort();
+    const daysLeft = Math.ceil((now.end - Date.now()) / 864e5);
+    const dueText = daysLeft <= 1 ? (new Date().getDay() === S.payDay ? "today" : "tomorrow") : `in ${daysLeft} days`;
+    const reminder = `Hi, a reminder that payments are due every ${now.dayName}. Please submit this week's payment by ${now.label} in the Secure Doc Share app (Submit a payment).`;
+    const list = (emails, note) => `<ul class="rank">${emails.map(e => { const l = lastPaid(e); return `<li><span><a href="#person/${encodeURIComponent(e)}">${esc(nameFor(e))}</a><span class="cell-sub">${esc(e)}</span></span>
+      <span class="v">${l ? inr(l.amount_sent) : "–"}<span class="cell-sub" style="text-align:right">${l ? `last paid ${esc(timeAgo(l.created_at))}` : note}</span></span></li>`; }).join("")}</ul>`;
 
     view.innerHTML = `
-      ${head("Payments", "Who hasn't paid yet.")}
+      ${head("Payments", `Payments are due every ${now.dayName}. This week's is due ${esc(now.label)} (${dueText}).`)}
       ${payTabs("missing")}
+      <div class="kpis">
+        ${kpi("Paid this week", paidNow.length, `of ${paidNow.length + dueNow.length} regular payers`)}
+        ${kpi("Not paid yet", dueNow.length, `Due ${esc(now.label)}`)}
+        ${kpi(`Missed ${esc(prev.label)}`, missedLast.length, "Paid before, skipped last week")}
+        ${kpi("Never submitted", never.length, "People with access or requests")}
+      </div>
       <div class="grid-2">
-        <div class="panel">
-          <div class="panel-head"><h2>Paid last week, not this week</h2><span class="muted small-text">Week starting ${esc(new Date(`${thisKey}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</span></div>
-          ${lastWeekOnly.length ? `<ul class="rank">${lastWeekOnly.map(r => `<li><span><a href="#person/${encodeURIComponent(r.email)}">${esc(r.name)}</a><span class="cell-sub">${esc(r.email)}</span></span>
-            <span class="v">${inr(r.last.amount_sent)}<span class="cell-sub" style="text-align:right">last time</span></span></li>`).join("")}</ul>`
-            : emptyState("Everyone's up to date", "Nobody who paid last week is missing this week.")}
+        <div>
+          <div class="panel">
+            <div class="panel-head"><h2>Not paid yet this week</h2><span class="muted small-text">Week ${esc(now.start.toLocaleDateString(undefined, { day: "numeric", month: "short" }))} to ${esc(now.label)}</span></div>
+            ${dueNow.length ? list(dueNow, "") : emptyState("Everyone's paid", "All regular payers have submitted this week.")}
+          </div>
+          <div class="panel section-gap">
+            <div class="panel-head"><h2>Missed last ${esc(now.dayName)}</h2><span class="muted small-text">${esc(prev.label)}</span></div>
+            ${missedLast.length ? list(missedLast, "") : emptyState("Nobody missed it", "Everyone who usually pays paid last week.")}
+          </div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>Never submitted</h2><span class="muted small-text">People with document access</span></div>
-          ${never.length ? `<ul class="rank">${never.slice(0, 200).map(e => `<li><a href="#person/${encodeURIComponent(e)}">${esc(e)}</a></li>`).join("")}</ul>`
+          <div class="panel-head"><h2>Never submitted</h2><span class="muted small-text">People with access or requests</span></div>
+          ${never.length ? `<ul class="rank">${never.slice(0, 200).map(e => `<li><a href="#person/${encodeURIComponent(e)}">${esc(nameOf(e))}</a></li>`).join("")}</ul>`
             : emptyState("No one missing", "Everyone with access has submitted at least once.")}
         </div>
       </div>
       <div class="panel section-gap"><div class="panel-body">
         <label for="remind" style="margin-top:0">Reminder message</label>
-        <div class="linkbox"><input id="remind" type="text" value="${esc(reminder)}"><button type="button" data-act="copyRemind">Copy</button>
-          <a class="btn" target="_blank" rel="noopener" id="waRemind" href="https://wa.me/?text=${encodeURIComponent(reminder)}">WhatsApp</a></div>
+        <textarea id="remind" rows="3">${esc(reminder)}</textarea>
+        <div class="row" style="margin-top:10px"><button type="button" class="primary" data-act="copyRemind">Copy</button>
+          <a class="btn" target="_blank" rel="noopener" id="waRemind" href="https://wa.me/?text=${encodeURIComponent(reminder)}">WhatsApp</a>
+          ${dueNow.length ? `<a class="btn" id="mailRemind" href="mailto:?bcc=${encodeURIComponent(dueNow.join(","))}&subject=${encodeURIComponent(`Payment due ${now.label}`)}&body=${encodeURIComponent(reminder)}">Email the ${dueNow.length} not paid yet</a>` : ""}</div>
       </div></div>`;
     $('[data-act="copyRemind"]').onclick = async () => { try { await navigator.clipboard.writeText($("#remind").value); toast("Message copied"); } catch { $("#remind").select(); } };
-    $("#remind").oninput = () => { $("#waRemind").href = `https://wa.me/?text=${encodeURIComponent($("#remind").value)}`; };
+    $("#remind").oninput = () => {
+      $("#waRemind").href = `https://wa.me/?text=${encodeURIComponent($("#remind").value)}`;
+      const m = $("#mailRemind"); if (m) m.href = `mailto:?bcc=${encodeURIComponent(dueNow.join(","))}&subject=${encodeURIComponent(`Payment due ${now.label}`)}&body=${encodeURIComponent($("#remind").value)}`;
+    };
   }
+
 
   function qrSvg(a) {
     if (!a.upi_id || !window.qrcode) return "";
@@ -1453,6 +1699,15 @@
           ${owner ? `<button type="button" data-act="saveExp">Save</button>` : ""}
         </div>
         <p class="hint" style="padding:0 18px 14px;margin:0">Submissions below this are flagged "Short by ₹…". Set 0 to turn the check off.</p>
+      </div>
+      <div class="panel section-gap">
+        <div class="panel-head"><h2>Payment day</h2></div>
+        <div class="panel-body row">
+          <label for="payDay" style="margin:0">Payments are due every</label>
+          <select id="payDay" style="width:auto" ${owner ? "" : "disabled"}>${window.App.DAY_NAMES.map((n, i) => `<option value="${i}" ${i === S.payDay ? "selected" : ""}>${n}</option>`).join("")}</select>
+          ${owner ? `<button type="button" data-act="savePayDay">Save</button>` : ""}
+        </div>
+        <p class="hint" style="padding:0 18px 14px;margin:0">People see the due date in the app, and the Missing tab and weekly chart use weeks that end on this day.</p>
       </div>`;
 
     const list = $("#acctList");
@@ -1486,6 +1741,13 @@
           toast("Account deleted"); await refresh();
         } });
     });
+    const saveDay = $('[data-act="savePayDay"]');
+    if (saveDay) saveDay.onclick = async () => {
+      const v = Number($("#payDay").value);
+      const { error } = await sb.from("app_settings").upsert({ key: "payment_day", value: v, updated_at: new Date().toISOString() });
+      if (error) return toast(error.message);
+      toast(`Payments are now due every ${window.App.DAY_NAMES[v]}`); await refresh();
+    };
     const save = $('[data-act="saveExp"]');
     if (save) save.onclick = async () => {
       const v = Number($("#expPct").value);
@@ -1561,13 +1823,33 @@
       if (r.action === "delete") return `Removed ${o.email} as ${o.role || "admin"}`;
       return `Changed ${n.email}'s role ${fmt(o.role)} → ${fmt(n.role)}`;
     }
+    const row = r.action === "delete" ? o : n;
+    const docName = id => D.doc.get(id)?.title || o.title || n.title || "a document";
+    const grpName = id => S.groups.find(g => g.id === id)?.name || "a group";
+    const verb = r.action === "insert" ? "Added" : r.action === "delete" ? "Removed" : "Changed";
+    switch (r.table_name) {
+      case "documents": return r.action === "insert" ? `Shared "${n.title}"` : r.action === "delete" ? `Deleted "${o.title}"` : `Changed "${n.title}": ${changed.filter(k => k !== "storage_path").map(k => k.replace(/_/g, " ")).join(", ") || "replaced the PDF"}`;
+      case "document_access": return `${r.action === "insert" ? "Gave" : "Removed"} ${row.email} ${r.action === "insert" ? "access to" : "from"} "${docName(row.document_id)}"`;
+      case "blocked_emails": return r.action === "insert" ? `Blocked ${n.email}${n.reason ? ` (${n.reason})` : ""}` : `Unblocked ${o.email}`;
+      case "people": return `${verb} profile of ${row.email}${r.action === "update" ? `: ${changed.map(k => k.replace(/_/g, " ")).join(", ")}` : ""}`;
+      case "groups": return `${verb} group "${row.name}"`;
+      case "group_members": return `${r.action === "insert" ? "Added" : "Removed"} ${row.email} ${r.action === "insert" ? "to" : "from"} ${grpName(row.group_id)}`;
+      case "group_documents": return `${r.action === "insert" ? "Shared" : "Unshared"} "${docName(row.document_id)}" ${r.action === "insert" ? "with" : "from"} ${grpName(row.group_id)}`;
+      case "access_requests": return r.action === "delete" ? `Deleted access request from ${o.email}` : `${n.status === "approved" ? "Approved" : n.status === "declined" ? "Declined" : "Changed"} access request from ${n.email}`;
+      case "document_views": return r.action === "delete" ? `Reset views of "${docName(o.document_id)}" for ${o.email}` : `Gave ${n.email} ${n.allowed} ${n.allowed === 1 ? "view" : "views"} of "${docName(n.document_id)}"`;
+      case "announcements": return `${verb} announcement "${row.title}"`;
+      case "faqs": return `${verb} help question "${row.question}"`;
+      case "feedback": return r.action === "delete" ? `Deleted feedback from ${o.email}` : changed.includes("admin_reply") ? `Replied to ${n.email}'s feedback` : `Marked ${n.email}'s feedback ${n.status}`;
+      case "device_locks": return r.action === "delete" ? `Reset the phone lock for ${o.email}` : `Moved ${n.email}'s phone lock to ${n.device_label || "a new phone"}`;
+      case "device_requests": return `${n.status === "approved" ? "Allowed" : n.status === "declined" ? "Declined" : "Changed"} ${row.email}'s new phone (${row.device_label || "Android"})`;
+    }
     return `${r.action} on ${r.table_name}`;
   }
 
   function payLog() {
-    const L = S.audit;
+    const L = S.audit.filter(r => ["payment_accounts", "payment_submissions", "app_settings", "admins"].includes(r.table_name));
     view.innerHTML = `
-      ${head("Payments", "Every change to payment accounts, reviews, settings and admins. Recorded by the database, can't be edited.")}
+      ${head("Payments", `Every change to payment accounts, reviews, settings and admins. Recorded by the database, can't be edited. Changes to everything else are in <a href="#security/log">Security, Change log</a>.`)}
       ${payTabs("log")}${v2Note()}
       <div class="panel">${L.length ? `<div class="table-wrap"><table class="data">
         <thead><tr><th>When</th><th>Who</th><th>What happened</th></tr></thead>

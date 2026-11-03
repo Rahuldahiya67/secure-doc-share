@@ -29,6 +29,7 @@
         <div class="card">
           <h2>Submit a payment</h2>
           <p class="sub">Four quick steps. You'll see the status below once it's reviewed.</p>
+          <div id="dueBox"></div>
           ${canUpload ? "" : `<div class="notice" style="margin-bottom:12px">This version of the app can't attach screenshots.
             <a href="${esc(cfg.apkUrl)}">Download the latest app</a>, or <a href="#" data-open-chrome>open this form in Chrome</a>.</div>`}
           <h3 class="step"><span>1</span>Your details</h3>
@@ -99,7 +100,7 @@
     $("#pOutlier").addEventListener("input", () => drawPayTo());
     $("#payForm").onsubmit = e => submit(e, user);
     await loadAccounts();
-    loadMine(user);
+    loadMine(user); drawDue(user);
   }
 
   // ---------- step 2: live percentage ----------
@@ -220,6 +221,21 @@
   }
 
   // Fingerprint of the original file, so the owner sees if the same screenshot is reused.
+  // Visual fingerprint (difference hash): similar-looking images get similar values,
+  // even after re-saving, resizing or recompressing.
+  async function dhash(file) {
+    try {
+      const bmp = await createImageBitmap(file);
+      const c = document.createElement("canvas"); c.width = 9; c.height = 8;
+      const g = c.getContext("2d", { willReadFrequently: true });
+      g.drawImage(bmp, 0, 0, 9, 8);
+      const px = g.getImageData(0, 0, 9, 8).data;
+      const lum = i => px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114;
+      let bits = "";
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits += lum((y * 9 + x) * 4) > lum((y * 9 + x + 1) * 4) ? "1" : "0";
+      return bits.match(/.{4}/g).map(b => parseInt(b, 2).toString(16)).join("");
+    } catch (_) { return null; }
+  }
   async function sha256(file) {
     try {
       const buf = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
@@ -270,9 +286,10 @@
     try {
       const uid = user.id, stamp = Date.now();
       const kinds = ["earnings", "referral", "payment"];
-      const [hashes, blobs] = await Promise.all([
+      const [hashes, blobs, looks] = await Promise.all([
         Promise.all(files.map(f => (f ? sha256(f) : null))),
-        Promise.all(files.map(f => (f ? compress(f) : null)))
+        Promise.all(files.map(f => (f ? compress(f) : null))),
+        Promise.all(files.map(f => (f ? dhash(f) : null)))
       ]);
       const paths = [null, null, null];
       for (let i = 0; i < 3; i++) {
@@ -284,13 +301,21 @@
         if (error) throw error;
       }
       say("Saving…", true);
-      const { error } = await sb.from("payment_submissions").insert({
+      const row = {
         name: val("pName"), outlier_id: val("pOutlier"), referred_by: val("pRef") || null, payout_date: val("pDate"),
         amount_earned: earned, amount_sent: sent, paid_via: val("pVia"), utr,
         account_id: chosenAccount?.id || null,
         earnings_path: paths[0], referral_path: paths[1], payment_path: paths[2],
-        earnings_hash: hashes[0], referral_hash: hashes[1], payment_hash: hashes[2]
-      });
+        earnings_hash: hashes[0], referral_hash: hashes[1], payment_hash: hashes[2],
+        earnings_phash: looks[0], referral_phash: looks[1], payment_phash: looks[2]
+      };
+      let { error } = await sb.from("payment_submissions").insert(row);
+      // Before 009_security.sql is run the fingerprint columns don't exist yet.
+      if (error && /phash/.test(error.message)) {
+        delete row.earnings_phash; delete row.referral_phash; delete row.payment_phash;
+        ({ error } = await sb.from("payment_submissions").insert(row));
+      }
+
       if (error) throw error;
       $("#payForm").reset();
       $("#pEmail").value = user.email;
@@ -299,7 +324,7 @@
       drawPayTo();
       say("Payment submitted. It's now under review.", true);
       toast("Payment submitted");
-      loadMine(user);
+      loadMine(user); drawDue(user);
     } catch (err) {
       const m = err.message || String(err);
       say(/utr_used/.test(m) ? "This UTR number has already been submitted. Check the number, or contact the owner if you think that's a mistake."
@@ -329,5 +354,24 @@
     }).join("")}</ul>`;
   }
 
-  window.Payments = { render };
+  // This week's payment: when it's due and whether it's been sent.
+  async function weekStatus(user) {
+    let day = 3; // Wednesday
+    const { data: st } = await sb.from("app_settings").select("value").eq("key", "payment_day").maybeSingle();
+    if (st && Number(st.value) >= 0 && Number(st.value) <= 6) day = Number(st.value);
+    const c = window.App.payCycle(day);
+    const { data } = await sb.from("payment_submissions").select("status,created_at")
+      .eq("user_id", user.id).gte("created_at", c.start.toISOString()).neq("status", "rejected").limit(1);
+    return { cycle: c, paid: Boolean(data?.length), dueToday: new Date().getDay() === day };
+  }
+  async function drawDue(user) {
+    const box = $("#dueBox"); if (!box) return;
+    const w = await weekStatus(user);
+    box.innerHTML = w.paid
+      ? `<div class="due ok">${icon("seal")}<span>You've sent this week's payment. Next one is due ${esc(w.cycle.dayName)}, ${esc(nextLabel(w))}.</span></div>`
+      : `<div class="due ${w.dueToday ? "today" : ""}">${icon("wallet")}<span>Payments are due every <strong>${esc(w.cycle.dayName)}</strong>. This week's is due <strong>${w.dueToday ? "today" : esc(w.cycle.label)}</strong>.</span></div>`;
+  }
+  function nextLabel(w) { const d = new Date(w.cycle.end); d.setDate(d.getDate() + 7); return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
+
+  window.Payments = { render, weekStatus };
 })();
