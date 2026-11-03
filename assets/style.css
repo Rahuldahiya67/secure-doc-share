@@ -534,3 +534,31 @@ body.readonly .main textarea#addEmails, body.readonly .main label[for="addEmails
 body.readonly .main #dGroup, body.readonly .main #docExp, body.readonly .main #allExp, body.readonly .main #gDoc, body.readonly .main #gAdd,
 body.readonly .main label[for="docExp"], body.readonly .main label[for="allExp"], body.readonly .main label[for="gAdd"],
 body.readonly .main [data-group], body.readonly .main #payDay, body.readonly .main #expPct { display: none !important; }
+
+/* Quizzes */
+.q-list { margin: 0; padding: 0 18px 0 38px; }
+.q-list > li { padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.q-list > li:last-child { border-bottom: 0; }
+.q-prompt { font-weight: 600; margin-bottom: 8px; white-space: pre-line; }
+.q-opts { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; font-size: 14px; }
+.q-opts li { display: flex; gap: 8px; padding: 4px 8px; border-radius: 6px; }
+.q-opts li span { color: var(--muted); width: 14px; }
+.q-opts li.right { background: var(--seal-soft); font-weight: 500; }
+.q-edit { display: grid; gap: 8px; }
+.quiz-q { border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px; margin-top: 12px; }
+.quiz-q .q-prompt { margin-bottom: 10px; }
+.quiz-opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 8px; margin-top: 8px; font-weight: 400; cursor: pointer; }
+.quiz-opt input { width: auto; margin: 3px 0 0; }
+.quiz-opt.right { border-color: var(--seal); background: var(--seal-soft); }
+.quiz-opt.wrong { border-color: var(--alert); background: var(--alert-soft); }
+.score { text-align: center; padding: 18px; border-radius: var(--radius); background: var(--surface-2); margin: 12px 0; }
+.score strong { display: block; font-size: 32px; }
+.bell { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 10px; color: var(--ink); }
+.bell svg { width: 20px; height: 20px; }
+.bell .dot { position: absolute; top: 3px; right: 2px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--alert); color: #fff; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.notif-list { list-style: none; margin: 0; padding: 0; }
+.notif-list li { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.notif-list li.unread .t { font-weight: 600; }
+.notif-list .ic { flex: none; width: 34px; height: 34px; border-radius: 9px; background: var(--seal-soft); color: var(--seal); display: flex; align-items: center; justify-content: center; }
+.notif-list .ic svg { width: 18px; height: 18px; }
+.notif-list .s { color: var(--muted); font-size: 13px; }

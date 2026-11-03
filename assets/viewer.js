@@ -40,6 +40,7 @@
     return;
   }
   renderHeader(user);
+  addBell(user);
 
   if (docId) await openDocument(docId, user);
   else if (viewName === "pay") await window.Payments.render(root, user);
@@ -47,6 +48,8 @@
   else if (viewName === "me") await myAccount(user);
   else if (viewName === "help") await helpPage(user);
   else if (viewName === "feedback") await feedbackPage(user);
+  else if (viewName === "quiz") await (params.get("id") ? takeQuiz(user, params.get("id")) : quizList(user));
+  else if (viewName === "inbox") await inboxPage(user);
   else await renderHome(user);
 
   // ---------------------------------------------------------------
@@ -71,10 +74,16 @@
           <span class="tile-text"><span class="t">Submit a payment</span>
           <span class="s" id="payTileSub">Send your earnings, payment and screenshots for review.</span></span>
         </a>
+        <span id="quizTile"></span>
         ${tile("?view=me", "user", "My account", "Your documents, reading time, payments and requests.")}
         ${tile("?view=help", "help", "Help", "Answers to common questions.")}
         ${tile("?view=feedback", "chat", "Send feedback", "Ideas, problems or questions for the owner.")}
       </div>`;
+    sb.rpc("list_quizzes").then(({ data }) => {
+      const el = $("#quizTile"); if (!el || !data?.length) return;
+      const todo = data.filter(q => !q.passed && !(q.one_attempt && q.attempts)).length;
+      el.outerHTML = tile("?view=quiz", "quiz", "Quizzes", todo ? `${todo} waiting for you.` : "All done. Retake any time.");
+    });
     window.Payments?.weekStatus?.(user).then(w => {
       const el = $("#payTileSub"); if (!el) return;
       el.innerHTML = w.paid ? "Done for this week. Thank you!" : `Due every ${esc(w.cycle.dayName)}. This week's is due <strong>${w.dueToday ? "today" : esc(w.cycle.label)}</strong>.`;
@@ -88,6 +97,98 @@
   function backLinkHome() { return `<a href="./" class="back">${icon("back")} Home</a>`; }
   function fmtSecs(n) { n = Math.round(n || 0); const h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60); return h ? `${h}h ${m}m` : `${m}m`; }
   function rupees(n) { return `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`; }
+
+  // ---------------------------------------------------------------
+  // Quizzes
+  // ---------------------------------------------------------------
+  async function quizList(user) {
+    const { data, error } = await sb.rpc("list_quizzes");
+    const list = error ? [] : data || [];
+    root.innerHTML = `${backLinkHome()}<div class="card"><h2>Quizzes</h2><p class="sub">Check what you've learned.</p>
+      ${list.length ? `<ul class="doc-list">${list.map(q => `<li><a href="?view=quiz&id=${encodeURIComponent(q.id)}">
+        <span class="doc-icon">${icon("quiz")}</span><span class="grow"><span class="t">${esc(q.title)}</span>
+        <span class="s">${q.questions} ${q.questions === 1 ? "question" : "questions"}${q.document_title ? `, about "${esc(q.document_title)}"` : ""}${q.attempts ? `, best ${q.best}%` : ""}</span></span>
+        ${q.passed ? `<span class="tag live">Passed</span>` : q.one_attempt && q.attempts ? `<span class="tag plain">Done</span>` : `<span class="btn small">${q.attempts ? "Retry" : "Start"}</span>`}</a></li>`).join("")}</ul>`
+        : `<div class="empty"><strong>No quizzes right now</strong>When the owner adds one for you, it shows up here.</div>`}</div>`;
+  }
+  async function takeQuiz(user, id) {
+    const { data: q, error } = await sb.rpc("get_quiz", { q: id });
+    if (error || !q) { root.innerHTML = `${backLinkHome()}<div class="card narrow"><h2>Quiz not available</h2><p class="sub">It may have been closed, or it's for people who can open a particular document.</p><a class="btn" href="?view=quiz">All quizzes</a></div>`; return; }
+    const L = "ABCDEF";
+    if (q.one_attempt && q.taken) { root.innerHTML = `${backLinkHome()}<div class="card narrow"><h2>${esc(q.title)}</h2><p class="sub">You've already taken this quiz. It allows one try.</p><a class="btn" href="?view=quiz">All quizzes</a></div>`; return; }
+    root.innerHTML = `<a href="?view=quiz" class="back">${icon("back")} Quizzes</a><div class="card"><h2>${esc(q.title)}</h2>
+      <p class="sub">${q.description ? `${esc(q.description)} ` : ""}${q.questions.length} questions. Pass mark ${q.pass_percent}%.${q.one_attempt ? " <strong>One try only.</strong>" : ""}</p>
+      <form id="quizForm">${q.questions.map((x, i) => `<fieldset class="quiz-q" data-q="${x.id}"><legend class="q-prompt">${i + 1}. ${esc(x.prompt)}</legend>
+        ${x.options.map((o, k) => `<label class="quiz-opt"><input type="radio" name="q${i}" value="${k}"><span><span class="muted">${L[k]}.</span> ${esc(o)}</span></label>`).join("")}</fieldset>`).join("")}
+        <button class="primary full" type="submit" style="margin-top:16px">Submit answers</button><p class="msg" id="qzMsg" role="status"></p></form></div>`;
+    let warned = false;
+    $("#quizForm").onsubmit = async e => {
+      e.preventDefault();
+      const answers = {}; let missing = 0;
+      q.questions.forEach((x, i) => { const c = $(`input[name="q${i}"]:checked`); if (c) answers[x.id] = Number(c.value); else missing++; });
+      const m = $("#qzMsg");
+      if (missing && !warned) { warned = true; m.className = "msg err"; m.textContent = `You haven't answered ${missing} ${missing === 1 ? "question" : "questions"}. Tap Submit again to send anyway.`; return; }
+      const btn = $("#quizForm button[type=submit]"); btn.disabled = true;
+      const { data: r, error: sErr } = await sb.rpc("submit_quiz", { q: id, answers });
+      if (sErr) { btn.disabled = false; m.className = "msg err"; m.textContent = /already_taken/.test(sErr.message) ? "You've already taken this quiz." : /too_many/.test(sErr.message) ? "Too many tries today. Please come back tomorrow." : "Couldn't submit. Please try again."; return; }
+      m.textContent = ""; m.className = "msg";
+      const pct = r.total ? Math.round((100 * r.score) / r.total) : 0;
+      r.review.forEach((v, i) => {
+        const fs = $(`[data-q="${v.id}"]`); if (!fs) return;
+        $$("input", fs).forEach(inp => { inp.disabled = true; const k = Number(inp.value), lab = inp.closest(".quiz-opt");
+          if (v.correct != null && k === v.correct) lab.classList.add("right");
+          else if (k === v.chosen && !v.right) lab.classList.add("wrong"); });
+        if (v.explanation) fs.insertAdjacentHTML("beforeend", `<p class="hint">${esc(v.explanation)}</p>`);
+      });
+      btn.remove();
+      $("#quizForm").insertAdjacentHTML("afterbegin", `<div class="score"><strong>${r.score} / ${r.total}</strong>${pct}%, ${r.passed ? "passed. Well done!" : `pass mark is ${r.pass_percent}%.`}</div>`);
+      $("#quizForm").insertAdjacentHTML("beforeend", `<div class="row" style="margin-top:14px"><a class="btn" href="?view=quiz">All quizzes</a>${q.one_attempt ? "" : `<a class="btn" href="?view=quiz&id=${encodeURIComponent(id)}">Try again</a>`}</div>`);
+      window.scrollTo(0, 0);
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // Notifications: what's new since you last looked
+  // ---------------------------------------------------------------
+  function seenAt() { try { return Number(localStorage.getItem("notifSeen")) || Date.now() - 7 * 864e5; } catch (_) { return Date.now() - 7 * 864e5; } }
+  async function gatherNotifications(user) {
+    const since = new Date(Date.now() - 30 * 864e5).toISOString();
+    const [anns, docs, pays, fb, reqs, devs] = await Promise.all([
+      sb.from("announcements").select("id,title,created_at").gte("created_at", since),
+      sb.from("documents").select("id,title,created_at").gte("created_at", since),
+      sb.from("payment_submissions").select("id,amount_sent,status,admin_note,reviewed_at").eq("user_id", user.id).gte("created_at", since),
+      sb.from("feedback").select("id,message,admin_reply,replied_at").gte("created_at", since),
+      sb.from("access_requests").select("id,status,decided_at").gte("created_at", since),
+      sb.from("device_requests").select("id,status,device_label,decided_at").gte("created_at", since)
+    ]);
+    const out = [];
+    (anns.data || []).forEach(a => out.push({ at: a.created_at, ic: "megaphone", t: a.title, s: "Announcement", href: "./" }));
+    (docs.data || []).forEach(d => out.push({ at: d.created_at, ic: "file", t: `New document: ${d.title}`, s: "Shared with you", href: `?doc=${encodeURIComponent(d.id)}` }));
+    (pays.data || []).filter(p => p.reviewed_at && p.status !== "pending").forEach(p => out.push({ at: p.reviewed_at, ic: "wallet", t: `Your ${rupees(p.amount_sent)} payment was ${p.status}`, s: p.admin_note || "Payments", href: "?view=pay" }));
+    (fb.data || []).filter(f => f.admin_reply && f.replied_at).forEach(f => out.push({ at: f.replied_at, ic: "chat", t: "The owner replied to your feedback", s: f.admin_reply.slice(0, 90), href: "?view=feedback" }));
+    (reqs.data || []).filter(r => r.decided_at).forEach(r => out.push({ at: r.decided_at, ic: "lock", t: r.status === "approved" ? "Your access request was approved" : "Your access request was declined", s: "Access", href: "?view=docs" }));
+    (devs.data || []).filter(r => r.decided_at).forEach(r => out.push({ at: r.decided_at, ic: "phone", t: r.status === "approved" ? `You can now read on ${r.device_label || "your new phone"}` : "Your new phone wasn't approved", s: "Phone", href: "?view=docs" }));
+    return out.sort((a, b) => new Date(b.at) - new Date(a.at));
+  }
+  async function addBell(user) {
+    const who = $("#bar .who"); if (!who) return;
+    who.insertAdjacentHTML("afterbegin", `<a class="bell" href="?view=inbox" aria-label="Notifications">${icon("bell")}<span class="dot" hidden></span></a>`);
+    try {
+      const list = await gatherNotifications(user);
+      const n = list.filter(x => new Date(x.at) > seenAt()).length;
+      const dot = $("#bar .bell .dot");
+      if (n && viewName !== "inbox") { dot.hidden = false; dot.textContent = n > 9 ? "9+" : n; $("#bar .bell").setAttribute("aria-label", `${n} new notifications`); }
+    } catch (_) {}
+  }
+  async function inboxPage(user) {
+    const seen = seenAt();
+    const list = await gatherNotifications(user);
+    try { localStorage.setItem("notifSeen", String(Date.now())); } catch (_) {}
+    root.innerHTML = `${backLinkHome()}<div class="card"><h2>Notifications</h2><p class="sub">The last 30 days.</p>
+      ${list.length ? `<ul class="notif-list">${list.map(x => `<li class="${new Date(x.at) > seen ? "unread" : ""}"><span class="ic">${icon(x.ic)}</span>
+        <a class="grow" href="${esc(x.href)}" style="color:inherit;text-decoration:none"><div class="t">${esc(x.t)}</div><div class="s">${esc(x.s)}, ${esc(timeAgo(x.at))}</div></a></li>`).join("")}</ul>`
+        : `<div class="empty"><strong>You're all caught up</strong>New documents, announcements and replies show up here.</div>`}</div>`;
+  }
 
   // ---------------------------------------------------------------
   async function myAccount(user) {

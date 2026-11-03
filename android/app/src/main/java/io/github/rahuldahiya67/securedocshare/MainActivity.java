@@ -37,6 +37,10 @@ public class MainActivity extends Activity {
     private static final String HOST = "rahuldahiya67.github.io";
     private static final String PATH_PREFIX = "/secure-doc-share/";
     private static final String BASE = "https://" + HOST + PATH_PREFIX;
+    // Short web address, once it's set up in GitHub Pages. The github.io address
+    // redirects there, and the app then remembers it so sign-in stays on one site.
+    private static final String CUSTOM_HOST = "docs.proaitrainers.in";
+    private static final String CUSTOM_BASE = "https://" + CUSTOM_HOST + "/";
     private static final String SCHEME = "securedocshare";
 
     private static final int PICK_FILE = 4201;
@@ -82,6 +86,15 @@ public class MainActivity extends Activity {
                 if (isOwnPage(u)) return false;     // stay inside the app
                 openExternal(u.toString());          // everything else goes to the browser
                 return true;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                Uri u = url == null ? null : Uri.parse(url);
+                if (u != null && "https".equals(u.getScheme()) && CUSTOM_HOST.equals(u.getHost())
+                        && !CUSTOM_BASE.equals(base())) {
+                    getSharedPreferences("app", MODE_PRIVATE).edit().putString("base", CUSTOM_BASE).apply();
+                }
             }
         });
 
@@ -224,7 +237,7 @@ public class MainActivity extends Activity {
     private String urlFor(Intent intent) {
         Uri data = intent == null ? null : intent.getData();
         if (data == null || !SCHEME.equals(data.getScheme())) {
-            return BASE;
+            return base();
         }
 
         String host = data.getHost();
@@ -233,24 +246,29 @@ public class MainActivity extends Activity {
         if ("auth".equals(host)) {
             String query = data.getEncodedQuery();
             String fragment = data.getEncodedFragment();
-            return BASE + (query != null ? "?" + query : "") + (fragment != null ? "#" + fragment : "");
+            return base() + (query != null ? "?" + query : "") + (fragment != null ? "#" + fragment : "");
         }
 
         // Opened from a share link: securedocshare://open?doc=<uuid>
         if ("open".equals(host)) {
             String doc = data.getQueryParameter("doc");
             if (doc != null && doc.matches("[0-9a-fA-F-]{36}")) {
-                return BASE + "?doc=" + doc;
+                return base() + "?doc=" + doc;
             }
         }
-        return BASE;
+        return base();
+    }
+
+    private String base() {
+        String b = getSharedPreferences("app", MODE_PRIVATE).getString("base", BASE);
+        return CUSTOM_BASE.equals(b) ? CUSTOM_BASE : BASE;
     }
 
     private static boolean isOwnPage(Uri u) {
-        if (u == null) return false;
+        if (u == null || !"https".equals(u.getScheme())) return false;
+        if (CUSTOM_HOST.equals(u.getHost())) return true;
         String path = u.getPath() == null ? "" : u.getPath();
-        return "https".equals(u.getScheme())
-                && HOST.equals(u.getHost())
+        return HOST.equals(u.getHost())
                 && (path.startsWith(PATH_PREFIX) || path.equals("/secure-doc-share"));
     }
 

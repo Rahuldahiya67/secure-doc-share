@@ -32,7 +32,7 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins, quizRows] = await Promise.all([
       sb.from("documents")
         .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -55,7 +55,8 @@
       sb.rpc("my_role"),
       sb.from("device_locks").select("*"),
       sb.from("device_requests").select("*").order("created_at", { ascending: false }).limit(300),
-      sb.from("admins").select("*").order("email")
+      sb.from("admins").select("*").order("email"),
+      sb.from("quizzes").select("*,quiz_questions(*),quiz_attempts(id,email,score,total,passed,answers,created_at)").order("created_at", { ascending: false })
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -79,6 +80,8 @@
     S.securityV1 = !role.error && !locks.error && !devReqs.error;
     S.role = role.error ? (S.isOwner ? "owner" : "admin") : role.data || "admin";
     S.deviceLocks = locks.data || []; S.deviceRequests = devReqs.data || []; S.admins = admins.data || [];
+    S.quizV1 = !quizRows.error;
+    S.quizzes = (quizRows.data || []).map(z => ({ ...z, quiz_attempts: (z.quiz_attempts || []).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) }));
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
     const pd = (settings.data || []).find(s => s.key === "payment_day");
@@ -189,6 +192,7 @@
     ["people", "People", "people"],
     ["activity", "Activity", "activity"],
     ["payments", "Payments", "wallet"],
+    ["quizzes", "Quizzes", "quiz"],
     ["messages", "Messages", "chat"],
     ["security", "Security", "shield"],
     ["blocked", "Blocked", "block"]
@@ -213,7 +217,7 @@
 
   function route(silent) {
     const [name, arg, arg2] = decodeURIComponent(location.hash.slice(1) || "overview").split("/");
-    const section = { doc: "documents", person: "people", group: "people", statement: "people", payment: "payments" }[name] || name;
+    const section = { doc: "documents", person: "people", group: "people", statement: "people", payment: "payments", quiz: "quizzes" }[name] || name;
     $$("[data-nav]").forEach(a => { if (a.dataset.nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
     $('[data-count="documents"]').textContent = S.docs.length || "";
     const pendReq = S.requests.filter(r => r.status === "pending").length;
@@ -226,7 +230,7 @@
     const newFb = S.feedback.filter(f => f.status === "new").length;
     $('[data-count="messages"]').textContent = newFb ? `${newFb} new` : "";
 
-    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, statement, messages, security, activity, blocked, payments, payment: paymentDetail };
+    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, statement, messages, security, quizzes, quiz: quizDetail, activity, blocked, payments, payment: paymentDetail };
     (pages[name] || overview)(arg, arg2);
     if (!silent) { window.scrollTo(0, 0); }
   }
@@ -1360,6 +1364,144 @@
       </div>`;
     $("#logArea").onchange = e => fullLog(e.target.value);
     $('[data-act="csv"]').onclick = () => downloadCsv([["When", "Who", "Table", "Action", "Summary"], ...L.map(r => [r.at, r.actor, r.table_name, r.action, auditSummary(r)])], "change-log.csv");
+  }
+
+  // ---------------------------------------------------------------
+  // Quizzes
+  // ---------------------------------------------------------------
+  function quizzes() {
+    if (!S.quizV1) {
+      view.innerHTML = `${head("Quizzes", "Check that people understood what they read.")}
+        <div class="notice">Run <code>supabase/010_quizzes.sql</code> in the Supabase SQL Editor to switch this on.</div>`;
+      return;
+    }
+    view.innerHTML = `
+      ${head("Quizzes", "Check that people understood what they read. Answers stay in the database; people only see them after they submit.", `<button class="primary" type="button" data-act="newQuiz">${icon("quiz")}New quiz</button>`)}
+      <div class="panel">${S.quizzes.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Quiz</th><th class="num">Questions</th><th class="num">People</th><th class="num">Passed</th><th class="num hide-sm">Average</th></tr></thead>
+        <tbody>${S.quizzes.map(z => { const st = quizStats(z); return `<tr class="clickable" tabindex="0" data-href="quiz/${z.id}">
+          <td><div class="cell-title">${esc(z.title)}</div><div class="cell-sub">${z.document_id ? `For "${esc(docTitle(z.document_id))}" readers` : "Anyone signed in"}${z.is_active ? "" : " · Hidden"}${z.one_attempt ? " · One try" : ""}</div></td>
+          <td class="num">${z.quiz_questions.length}</td><td class="num">${st.people}</td>
+          <td class="num">${st.people ? `${st.passed} of ${st.people}` : "–"}</td><td class="num hide-sm">${st.avg == null ? "–" : `${st.avg}%`}</td></tr>`; }).join("")}</tbody></table></div>`
+        : emptyState("No quizzes yet", "Make a short multiple-choice quiz for a document or for everyone.")}</div>`;
+    $('[data-act="newQuiz"]').onclick = () => quizDialog(null);
+    wireCommon();
+  }
+  function quizStats(z) {
+    const byEmail = groupBy(z.quiz_attempts, a => a.email);
+    const best = [...byEmail.values()].map(l => Math.max(...l.map(a => a.total ? (100 * a.score) / a.total : 0)));
+    return { people: byEmail.size, passed: [...byEmail.values()].filter(l => l.some(a => a.passed)).length, avg: best.length ? Math.round(best.reduce((t, v) => t + v, 0) / best.length) : null, byEmail };
+  }
+  function quizDialog(z) {
+    openDialog(`
+      <div class="dlg-head"><h2>${z ? "Quiz settings" : "New quiz"}</h2></div>
+      <div class="dlg-body">
+        <label for="qzT">Title</label><input id="qzT" type="text" required maxlength="150" value="${esc(z?.title || "")}" placeholder="e.g. Onboarding guide check">
+        <label for="qzD">Description (optional)</label><input id="qzD" type="text" maxlength="1000" value="${esc(z?.description || "")}">
+        <label for="qzDoc">Who can take it</label><select id="qzDoc"><option value="">Anyone signed in</option>${S.docs.map(d => `<option value="${d.id}" ${z?.document_id === d.id ? "selected" : ""}>People who can open "${esc(d.title)}"</option>`).join("")}</select>
+        <div class="form-grid"><div><label for="qzP">Pass mark (%)</label><input id="qzP" type="number" min="0" max="100" value="${z?.pass_percent ?? 60}"></div></div>
+        <label class="row" style="gap:8px;font-weight:400;margin-top:14px"><input type="checkbox" id="qzOne" style="width:auto;margin:0" ${z?.one_attempt ? "checked" : ""}> One try only</label>
+        <label class="row" style="gap:8px;font-weight:400;margin-top:8px"><input type="checkbox" id="qzShow" style="width:auto;margin:0" ${z ? (z.show_answers ? "checked" : "") : "checked"}> Show correct answers after they submit</label>
+        <label class="row" style="gap:8px;font-weight:400;margin-top:8px"><input type="checkbox" id="qzOn" style="width:auto;margin:0" ${z ? (z.is_active ? "checked" : "") : "checked"}> Showing in the app</label>
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">${z ? "Save" : "Create quiz"}</button></div>`,
+      async () => {
+        const row = { title: $("#qzT").value.trim(), description: $("#qzD").value.trim() || null, document_id: $("#qzDoc").value || null,
+          pass_percent: Math.min(100, Math.max(0, Number($("#qzP").value) || 0)), one_attempt: $("#qzOne").checked, show_answers: $("#qzShow").checked, is_active: $("#qzOn").checked };
+        if (z) { const { error } = await sb.from("quizzes").update(row).eq("id", z.id); if (error) throw error; dlg.close(); toast("Saved"); await refresh(); return; }
+        const { data, error } = await sb.from("quizzes").insert(row).select("id").single();
+        if (error) throw error;
+        dlg.close(); toast("Quiz created. Add questions next."); await refresh(); location.hash = `quiz/${data.id}`;
+      });
+  }
+  function quizDetail(id) {
+    const z = S.quizzes.find(x => x.id === id);
+    if (!z) { view.innerHTML = head("Quiz not found", "It may have been deleted.", "", backLink("#quizzes", "Quizzes")); return; }
+    const Q = z.quiz_questions.slice().sort((a, b) => a.sort_order - b.sort_order);
+    const st = quizStats(z);
+    const L = "ABCDEF";
+    view.innerHTML = `
+      ${head(z.title, `${z.document_id ? `For people who can open "${esc(docTitle(z.document_id))}"` : "Anyone signed in"} · pass mark ${z.pass_percent}%${z.one_attempt ? " · one try" : ""}${z.is_active ? "" : " · <strong>hidden</strong>"}`,
+        `<button type="button" data-act="settings">Settings</button><button type="button" class="danger" data-act="delQuiz">Delete</button>`, backLink("#quizzes", "Quizzes"))}
+      <div class="kpis">
+        ${kpi("Questions", Q.length, Q.length ? "" : "Add at least one")}
+        ${kpi("People", st.people, `${z.quiz_attempts.length} ${z.quiz_attempts.length === 1 ? "attempt" : "attempts"}`)}
+        ${kpi("Passed", st.people ? `${st.passed} of ${st.people}` : "–", `${z.pass_percent}% or more`)}
+        ${kpi("Average best score", st.avg == null ? "–" : `${st.avg}%`, "")}
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Questions</h2><button class="small primary" type="button" data-act="addQ">Add question</button></div>
+          ${Q.length ? `<ol class="q-list">${Q.map((q, i) => {
+            const wrong = z.quiz_attempts.filter(a => a.answers && a.answers[q.id] !== undefined && a.answers[q.id] !== q.correct).length;
+            return `<li><div class="q-prompt">${esc(q.prompt)}</div>
+            <ul class="q-opts">${q.options.map((o, k) => `<li class="${k === q.correct ? "right" : ""}"><span>${L[k]}</span>${esc(o)}</li>`).join("")}</ul>
+            ${q.explanation ? `<p class="hint">${esc(q.explanation)}</p>` : ""}
+            <div class="row"><button class="small" type="button" data-editq="${q.id}">Edit</button>
+              <button class="small ghost" type="button" data-mvq="${i}" data-dir="-1" ${i ? "" : "disabled"} aria-label="Move up">↑</button>
+              <button class="small ghost" type="button" data-mvq="${i}" data-dir="1" ${i < Q.length - 1 ? "" : "disabled"} aria-label="Move down">↓</button>
+              <button class="small ghost" type="button" data-delq="${q.id}">Delete</button>
+              <span class="spacer"></span>${z.quiz_attempts.length ? `<span class="muted small-text">${wrong} got it wrong</span>` : ""}</div></li>`; }).join("")}</ol>`
+            : emptyState("No questions yet", "Add multiple-choice questions with 2 to 6 options.")}
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Results</h2>${st.people ? `<button class="small" type="button" data-act="csv">CSV</button>` : ""}</div>
+          ${st.people ? `<div class="table-wrap"><table class="data"><tbody>${[...st.byEmail.entries()].map(([email, l]) => {
+            const best = l.reduce((b, a) => (a.score / a.total > b.score / b.total ? a : b), l[0]);
+            return `<tr><td><a href="#person/${encodeURIComponent(email)}">${esc(nameOf(email))}</a><div class="cell-sub">${l.length} ${l.length === 1 ? "try" : "tries"}, last ${esc(timeAgo(l[0].created_at))}</div></td>
+              <td class="num">${best.score}/${best.total}</td><td>${l.some(a => a.passed) ? `<span class="tag live">Passed</span>` : `<span class="tag warn">Not yet</span>`}</td>
+              <td class="num">${z.one_attempt ? `<button class="small ghost" type="button" data-retry="${esc(email)}" title="Delete their attempts so they can try again">Allow retry</button>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`
+            : emptyState("No attempts yet", "Results show up here once people take the quiz in the app.")}
+        </div>
+      </div>`;
+    const act = n => $(`[data-act="${n}"]`, view);
+    act("settings").onclick = () => quizDialog(z);
+    act("addQ").onclick = () => questionDialog(z, null);
+    act("delQuiz").onclick = () => confirmDialog({ title: `Delete "${z.title}"?`, text: "Its questions and results are deleted too.", confirm: "Delete quiz", danger: true,
+      run: async () => { const { error } = await sb.from("quizzes").delete().eq("id", z.id); if (error) throw error; toast("Quiz deleted"); location.hash = "quizzes"; await refresh(); } });
+    if (act("csv")) act("csv").onclick = () => downloadCsv([["Email", "Name", "Score", "Total", "Passed", "When"], ...z.quiz_attempts.map(a => [a.email, nameOf(a.email), a.score, a.total, a.passed ? "yes" : "no", a.created_at])], `${z.title}-results.csv`);
+    $$("[data-editq]", view).forEach(b => b.onclick = () => questionDialog(z, Q.find(q => q.id === b.dataset.editq)));
+    $$("[data-delq]", view).forEach(b => b.onclick = async () => { const { error } = await sb.from("quiz_questions").delete().eq("id", b.dataset.delq); if (error) return toast(error.message); toast("Question deleted"); await refresh(); });
+    $$("[data-mvq]", view).forEach(b => b.onclick = async () => {
+      const list = Q.slice(), i = Number(b.dataset.mvq), j = i + Number(b.dataset.dir);
+      [list[i], list[j]] = [list[j], list[i]];
+      const res = await Promise.all(list.map((q, k) => q.sort_order === k ? null : sb.from("quiz_questions").update({ sort_order: k }).eq("id", q.id)).filter(Boolean));
+      const err = res.find(r => r.error); if (err) return toast(err.error.message); await refresh();
+    });
+    $$("[data-retry]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("quiz_attempts").delete().eq("quiz_id", z.id).eq("email", b.dataset.retry);
+      if (error) return toast(error.message); toast("They can take it again"); await refresh();
+    });
+  }
+  function questionDialog(z, q) {
+    const opts = q ? q.options.slice() : ["", "", "", ""];
+    while (opts.length < 6) opts.push("");
+    openDialog(`
+      <div class="dlg-head"><h2>${q ? "Edit question" : "Add question"}</h2><p class="sub" style="margin:6px 0 0">Fill in 2 to 6 options and pick the right one.</p></div>
+      <div class="dlg-body">
+        <label for="qP">Question</label><textarea id="qP" rows="3" required maxlength="1000">${esc(q?.prompt || "")}</textarea>
+        <label>Options</label>
+        <div class="q-edit">${opts.map((o, k) => `<label class="row" style="margin:0;gap:8px;font-weight:400;flex-wrap:nowrap">
+          <input type="radio" name="qC" value="${k}" style="width:auto;margin:0" ${q ? (q.correct === k ? "checked" : "") : k === 0 ? "checked" : ""} aria-label="Option ${"ABCDEF"[k]} is correct">
+          <span class="muted" style="width:14px">${"ABCDEF"[k]}</span><input type="text" data-opt="${k}" maxlength="300" value="${esc(o)}" placeholder="${k < 2 ? "Required" : "Optional"}"></label>`).join("")}</div>
+        <p class="hint">The selected circle marks the correct answer.</p>
+        <label for="qE">Explanation (optional)</label><input id="qE" type="text" maxlength="1000" value="${esc(q?.explanation || "")}" placeholder="Shown after they submit">
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Save</button></div>`,
+      async () => {
+        const raw = $$("[data-opt]", dlg).map(i => i.value.trim());
+        const chosen = Number($('input[name="qC"]:checked', dlg)?.value ?? 0);
+        if (!raw[chosen]) throw new Error("The correct answer can't be empty.");
+        const keep = raw.map((t, k) => ({ t, k })).filter(x => x.t);
+        if (keep.length < 2) throw new Error("Add at least two options.");
+        const row = { prompt: $("#qP").value.trim(), options: keep.map(x => x.t), correct: keep.findIndex(x => x.k === chosen), explanation: $("#qE").value.trim() || null };
+        const { error } = q ? await sb.from("quiz_questions").update(row).eq("id", q.id)
+          : await sb.from("quiz_questions").insert({ ...row, quiz_id: z.id, sort_order: z.quiz_questions.length });
+        if (error) throw error;
+        dlg.close(); toast("Saved"); await refresh();
+      });
   }
 
   // ---------------------------------------------------------------
