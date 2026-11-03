@@ -601,7 +601,8 @@
     let current = 1;
     const ratios = new Map();
     const io = new IntersectionObserver(entries => {
-      entries.forEach(e => ratios.set(Number(e.target.dataset.page), e.intersectionRatio));
+      // Credit the page that fills the most of the screen (works when zoomed in too).
+      entries.forEach(e => ratios.set(Number(e.target.dataset.page), e.isIntersecting ? e.intersectionRect.height : 0));
       let best = current, bestR = -1;
       ratios.forEach((r, p) => { if (r > bestR) { bestR = r; best = p; } });
       current = best;
@@ -617,19 +618,24 @@
     if (error || !sid) return;
 
     const active = () => document.visibilityState === "visible" && !document.body.classList.contains("shielded");
-    const beat = () => sb.rpc("heartbeat", { sid, page: current });
+    // Supabase only sends a request once its result is awaited, so always .then() these.
+    const send = (fn, args) => sb.rpc(fn, args).then(() => {}, () => {});
+    const beat = () => send("heartbeat", { sid, page: current });
     let wasActive = true;
 
     setInterval(() => {
       const now = active();
       if (now && wasActive) beat();
-      else if (now && !wasActive) sb.rpc("resume_session", { sid });
+      else if (now && !wasActive) send("resume_session", { sid });
       wasActive = now;
     }, 15000);
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") { if (wasActive) beat(); wasActive = false; }
+      else if (!wasActive && active()) { send("resume_session", { sid }); wasActive = true; }
     });
+    // Leaving the reader (back button, another link) saves the last few seconds.
+    window.addEventListener("pagehide", () => { if (wasActive) beat(); });
   }
 
   function deviceLabel() {

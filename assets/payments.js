@@ -158,8 +158,8 @@
         <div class="payee-main">
           <div class="muted small-text">Paying</div>
           <div class="payee-name">${esc(a.payee_name)}</div>
-          ${a.upi_id ? `<div class="row" style="gap:8px;margin-top:6px"><code class="upi">${esc(a.upi_id)}</code>
-            <button type="button" class="small" data-copy="${esc(a.upi_id)}">Copy UPI ID</button></div>` : ""}
+          ${a.upi_id ? `<div class="row" style="gap:8px;margin-top:8px">
+            <button type="button" class="small" data-copy="1">Copy UPI ID</button></div>` : ""}
           <div class="amount-due">${amount > 0 ? `Amount: <strong>${inr(amount)}</strong>` : `<span class="muted">Enter the amount in step 2 to fill it in automatically.</span>`}</div>
           ${a.instructions ? `<p class="hint" style="margin-top:8px">${esc(a.instructions)}</p>` : ""}
         </div>
@@ -186,9 +186,10 @@
     } else qrBox.hidden = true;
 
     $$("[data-acc]", box).forEach(b => b.onclick = () => { chosenAccount = accounts.find(x => x.id === b.dataset.acc); drawPayTo(); });
+    // The UPI ID isn't shown on screen; it only goes to the clipboard.
     $$("[data-copy]", box).forEach(b => b.onclick = async () => {
-      try { await navigator.clipboard.writeText(b.dataset.copy); toast("UPI ID copied"); }
-      catch { toast(b.dataset.copy); }
+      try { await navigator.clipboard.writeText(a.upi_id); toast("UPI ID copied. Paste it in your UPI app."); }
+      catch { toast("Couldn't copy here. Scan the QR or use a UPI app button instead."); }
     });
     $$("[data-via]", box).forEach(link => link.addEventListener("click", e => {
       const via = $("#pVia");
