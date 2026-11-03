@@ -101,7 +101,9 @@
     if (!data.length) {
       root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2>
         <div class="empty"><strong>Nothing here yet</strong>
-        Documents shared with ${esc(user.email)} will appear here. If you expected one, ask the owner to check your email ID.</div></div>`;
+        Documents shared with ${esc(user.email)} will appear here. If you expected one, ask the owner to check your email ID.</div>
+        <div id="reqBox" class="req-card"></div></div>`;
+      requestAccess(user, $("#reqBox"));
       return;
     }
     root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2><p class="sub">${data.length} ${data.length === 1 ? "document" : "documents"}</p>
@@ -115,13 +117,51 @@
   }
 
   // ---------------------------------------------------------------
+  // Ask the owner for access; shows the status of the latest request.
+  async function requestAccess(user, box) {
+    if (!box) return;
+    const { data, error } = await sb.from("access_requests").select("status,created_at,decided_at")
+      .order("created_at", { ascending: false }).limit(1);
+    if (error) { box.remove(); return; } // feature not switched on yet
+    const last = data?.[0];
+    if (last?.status === "pending") {
+      box.innerHTML = `<h3 style="margin:0 0 6px">Request sent</h3><p class="sub" style="margin:0">You asked for access ${esc(timeAgo(last.created_at))}. The owner will review it soon.</p>`;
+      return;
+    }
+    const name = user.user_metadata?.full_name || user.user_metadata?.name || "";
+    box.innerHTML = `
+      <h3 style="margin:0 0 6px">Request access</h3>
+      <p class="sub" style="margin:0 0 6px">${last?.status === "declined" ? "Your last request was declined. You can send a new one." : last?.status === "approved" ? "Your last request was approved. Need more? Ask again." : "Send a request to the owner with your email ID."}</p>
+      <form id="reqForm">
+        <label for="rqName">Your name</label><input id="rqName" type="text" required maxlength="120" value="${esc(name)}">
+        <label for="rqMsg">Message (optional)</label><textarea id="rqMsg" rows="3" maxlength="500" placeholder="e.g. Referred by Hrsh, joining Batch 3"></textarea>
+        <button class="primary full" type="submit" style="margin-top:12px">Send request</button>
+        <p class="msg" id="rqStatus" role="status"></p>
+      </form>`;
+    $("#reqForm", box).onsubmit = async e => {
+      e.preventDefault();
+      const btn = $("button[type=submit]", box); btn.disabled = true;
+      const { error: iErr } = await sb.from("access_requests").insert({ name: $("#rqName").value.trim(), message: $("#rqMsg").value.trim() || null });
+      if (iErr) {
+        btn.disabled = false;
+        const st = $("#rqStatus"); st.className = "msg err";
+        st.textContent = /duplicate|unique/.test(iErr.message) ? "You already have a request waiting." : "Couldn't send the request. Please try again.";
+        return;
+      }
+      requestAccess(user, box);
+    };
+  }
+
+  // ---------------------------------------------------------------
   async function openDocument(id, user) {
     root.innerHTML = `<div class="card"><p class="muted">Checking access…</p></div>`;
 
     const noAccess = () => {
       root.innerHTML = `<div class="card narrow"><h2>You don't have access</h2>
         <p class="sub">${esc(user.email)} isn't on the list for this document, or the link was turned off or has expired. Ask the owner to check your email ID.</p>
-        <a class="btn" href="?view=docs">See documents shared with you</a></div>`;
+        <a class="btn" href="?view=docs">See documents shared with you</a>
+        <div id="reqBox" class="req-card"></div></div>`;
+      requestAccess(user, $("#reqBox"));
     };
 
     const { data: doc, error } = await sb.from("documents").select("id,title").eq("id", id).maybeSingle();

@@ -28,11 +28,11 @@
   // Data
   // ---------------------------------------------------------------
   const LIVE_MS = 45 * 1000;
-  const S = { docs: [], sessions: [], blocked: [], payments: [], accounts: [], audit: [] };
+  const S = { docs: [], sessions: [], blocked: [], payments: [], accounts: [], audit: [], peopleRows: [], groups: [], requests: [] };
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests] = await Promise.all([
       sb.from("documents")
         .select("id,title,storage_path,is_active,expires_at,created_at,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -44,7 +44,10 @@
       sb.from("payment_accounts").select("*").order("sort_order").order("created_at"),
       sb.from("app_settings").select("key,value"),
       sb.from("audit_log").select("*").order("at", { ascending: false }).limit(300),
-      sb.rpc("is_owner")
+      sb.rpc("is_owner"),
+      sb.from("people").select("*"),
+      sb.from("groups").select("id,name,description,created_at,group_members(email,added_at),group_documents(document_id)").order("name"),
+      sb.from("access_requests").select("*").order("created_at", { ascending: false }).limit(500)
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -57,6 +60,10 @@
     S.accounts = accounts.error ? [] : accounts.data || [];
     S.audit = audit.error ? [] : audit.data || [];
     S.isOwner = owner.error ? false : Boolean(owner.data);
+    S.peopleV2 = !peopleRows.error && !groups.error && !requests.error;
+    S.peopleRows = peopleRows.error ? [] : peopleRows.data || [];
+    S.groups = groups.error ? [] : groups.data || [];
+    S.requests = requests.error ? [] : requests.data || [];
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
     if (S.accounts.some(x => x.qr_path)) {
@@ -72,8 +79,25 @@
     D.sessByDoc = groupBy(S.sessions, s => s.document_id);
     D.sessByEmail = groupBy(S.sessions, s => s.email);
     D.people = new Map(); // email -> { docs:Set, opened:Set }
-    S.docs.forEach(d => d.document_access.forEach(a => person(a.email).docs.add(d.id)));
+    // Who can open each document: its own list plus members of any group it's shared with.
+    D.access = new Map(); // doc id -> Map(email -> { direct:bool, groups:[names] })
+    S.docs.forEach(d => {
+      const m = new Map(d.document_access.map(a => [a.email, { direct: true, added_at: a.added_at, groups: [] }]));
+      D.access.set(d.id, m);
+    });
+    S.groups.forEach(g => g.group_documents.forEach(gd => {
+      const m = D.access.get(gd.document_id); if (!m) return;
+      g.group_members.forEach(gm => {
+        if (!m.has(gm.email)) m.set(gm.email, { direct: false, added_at: gm.added_at, groups: [] });
+        m.get(gm.email).groups.push(g.name);
+      });
+    }));
+    D.access.forEach((m, id) => m.forEach((_, email) => person(email).docs.add(id)));
     S.sessions.forEach(s => person(s.email).opened.add(s.document_id));
+    S.payments.forEach(p => person(p.email));
+    S.peopleRows.forEach(p => person(p.email));
+    S.groups.forEach(g => g.group_members.forEach(m => person(m.email)));
+    S.requests.forEach(r => person(r.email));
   }
   function person(email) {
     if (!D.people.has(email)) D.people.set(email, { docs: new Set(), opened: new Set() });
@@ -147,15 +171,16 @@
 
   function route(silent) {
     const [name, arg] = decodeURIComponent(location.hash.slice(1) || "overview").split("/");
-    const section = { doc: "documents", person: "people", payment: "payments" }[name] || name;
+    const section = { doc: "documents", person: "people", group: "people", payment: "payments" }[name] || name;
     $$("[data-nav]").forEach(a => { if (a.dataset.nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
     $('[data-count="documents"]').textContent = S.docs.length || "";
-    $('[data-count="people"]').textContent = D.people.size || "";
+    const pendReq = S.requests.filter(r => r.status === "pending").length;
+    $('[data-count="people"]').textContent = pendReq ? `${pendReq} new` : (D.people.size || "");
     $('[data-count="blocked"]').textContent = S.blocked.length || "";
     const pendingPays = S.payments.filter(p => p.status === "pending").length;
     $('[data-count="payments"]').textContent = pendingPays ? `${pendingPays} new` : "";
 
-    const pages = { overview, documents, doc: docDetail, people, person: personDetail, activity, blocked, payments, payment: paymentDetail };
+    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, activity, blocked, payments, payment: paymentDetail };
     (pages[name] || overview)(arg);
     if (!silent) { window.scrollTo(0, 0); }
   }
@@ -198,7 +223,7 @@
 
     const topDocs = S.docs.map(d => {
       const ss = D.sessByDoc.get(d.id) || [];
-      const allowed = new Set(d.document_access.map(x => x.email));
+      const allowed = new Set(D.access.get(d.id).keys());
       return { d, secs: sum(ss, s => s.seconds), viewers: new Set(ss.map(s => s.email).filter(e => allowed.has(e))).size, last: ss[0]?.last_seen_at };
     }).sort((a, b) => b.secs - a.secs).slice(0, 5);
 
@@ -237,7 +262,7 @@
           <thead><tr><th>Document</th><th class="num">Opened by</th><th class="num">Reading time</th><th class="hide-sm">Last opened</th></tr></thead>
           <tbody>${topDocs.map(({ d, secs, viewers, last }) => `
             <tr class="clickable" tabindex="0" data-href="doc/${d.id}"><td><div class="cell-title">${esc(d.title)}</div></td>
-            <td class="num">${viewers} of ${d.document_access.length}</td><td class="num">${fmtDuration(secs)}</td>
+            <td class="num">${viewers} of ${D.access.get(d.id).size}</td><td class="num">${fmtDuration(secs)}</td>
             <td class="hide-sm muted">${last ? esc(timeAgo(last)) : "Not opened yet"}</td></tr>`).join("")}</tbody></table></div>`
           : emptyState("No documents yet", "Share your first PDF to start tracking who reads it.")}
       </div>`;
@@ -285,7 +310,7 @@
           return `<tr class="clickable" tabindex="0" data-href="doc/${d.id}">
             <td><div class="cell-title">${esc(d.title)}</div><div class="cell-sub">Shared ${esc(timeAgo(d.created_at))}${d.expires_at ? `, expires ${esc(fmtDate(d.expires_at))}` : ""}</div></td>
             <td>${live ? `<span class="tag now">Being read</span>` : `<span class="tag ${st.cls}">${st.text}</span>`}</td>
-            <td class="num">${new Set(ss.map(s => s.email).filter(e => d.document_access.some(x => x.email === e))).size} of ${d.document_access.length}</td>
+            <td class="num">${new Set(ss.map(s => s.email).filter(e => D.access.get(d.id).has(e))).size} of ${D.access.get(d.id).size}</td>
             <td class="num">${fmtDuration(sum(ss, s => s.seconds))}</td>
             <td class="hide-sm muted">${ss[0] ? esc(timeAgo(ss[0].last_seen_at)) : "Not opened yet"}</td></tr>`;
         }).join("")}</tbody></table></div>`
@@ -302,7 +327,11 @@
     if (!d) { view.innerHTML = head("Document not found", "It may have been deleted.", "", backLink("#documents", "Documents")); return; }
     const ss = D.sessByDoc.get(d.id) || [];
     const st = docStatus(d);
-    const allowed = d.document_access.map(a => a.email).sort();
+    const acc = D.access.get(d.id);
+    const allowed = [...acc.keys()].sort();
+    const direct = d.document_access.map(a => a.email);
+    const docGroups = S.groups.filter(g => g.group_documents.some(x => x.document_id === d.id));
+    const otherGroups = S.groups.filter(g => !docGroups.includes(g));
     const readers = new Set(ss.map(s => s.email));
     const totalSec = sum(ss, s => s.seconds);
     const pageCount = Math.max(0, ...ss.map(s => s.page_count || 0));
@@ -316,7 +345,7 @@
     const rows = emails.map(email => {
       const mine = ss.filter(s => s.email === email);
       return {
-        email, mine, allowed: allowed.includes(email), secs: sum(mine, s => s.seconds),
+        email, mine, allowed: allowed.includes(email), direct: direct.includes(email), via: acc.get(email)?.groups || [], secs: sum(mine, s => s.seconds),
         furthest: Math.max(0, ...mine.map(s => s.max_page || 0)), last: mine[0]?.last_seen_at, live: mine.some(isLive)
       };
     }).sort((a, b) => (b.live - a.live) || (b.secs - a.secs) || a.email.localeCompare(b.email));
@@ -353,16 +382,16 @@
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>People</h2><div class="row"><span class="muted small-text">${allowed.length} allowed</span>
-            ${allowed.length ? `<button class="small danger" type="button" data-act="revokeDoc">Remove everyone</button>` : ""}</div></div>
+            ${direct.length ? `<button class="small danger" type="button" data-act="revokeDoc">Remove everyone</button>` : ""}</div></div>
           ${rows.length ? `<div class="table-wrap"><table class="data">
             <thead><tr><th>Email</th><th>Status</th><th class="num">Time</th><th class="num hide-sm">Furthest page</th><th></th></tr></thead>
             <tbody>${rows.map(r => `<tr>
               <td><a href="#person/${encodeURIComponent(r.email)}" class="cell-title">${esc(r.email)}</a>
-                <div class="cell-sub">${r.last ? `Last opened ${esc(timeAgo(r.last))}` : "Not opened yet"}</div></td>
+                <div class="cell-sub">${r.last ? `Last opened ${esc(timeAgo(r.last))}` : "Not opened yet"}${r.via.length && !r.direct ? `, via ${esc(r.via.join(", "))}` : ""}</div></td>
               <td>${personTag(r.email, r)}</td>
               <td class="num">${r.secs ? fmtDuration(r.secs) : "–"}</td>
               <td class="num hide-sm">${r.furthest ? `${r.furthest} of ${pageCount}` : "–"}</td>
-              <td class="num">${r.allowed ? `<button class="small ghost" data-remove="${esc(r.email)}" type="button">Remove</button>` : ""}</td></tr>`).join("")}
+              <td class="num">${r.direct ? `<button class="small ghost" data-remove="${esc(r.email)}" type="button">Remove</button>` : r.via.length ? `<span class="muted small-text">Group</span>` : ""}</td></tr>`).join("")}
             </tbody></table></div>` : emptyState("No one has access", "Add email IDs below.")}
           <div class="panel-body" style="border-top:1px solid var(--rule)">
             <label for="addEmails" style="margin-top:0">Add people</label>
@@ -370,12 +399,23 @@
             <div class="row" style="margin-top:10px"><button class="primary small" type="button" data-act="add">Add to this document</button><span id="addMsg" class="msg" style="margin:0"></span></div>
           </div>
         </div>
+        <div>
         <div class="panel">
+          <div class="panel-head"><h2>Groups</h2><span class="muted small-text">Every member can open this</span></div>
+          ${docGroups.length ? `<ul class="rank">${docGroups.map(g => `<li><a href="#group/${g.id}">${esc(g.name)} <span class="muted small-text">${g.group_members.length} members</span></a>
+            <button class="small ghost" type="button" data-ungroup="${g.id}">Remove</button></li>`).join("")}</ul>`
+            : `<div class="panel-body"><p class="muted small-text" style="margin:0">${S.peopleV2 ? (S.groups.length ? "Not shared with any group." : `No groups yet. <a href="#people/groups">Create one</a> to share with a whole batch at once.`) : "Run supabase/006_people.sql to use groups."}</p></div>`}
+          ${otherGroups.length ? `<div class="panel-body row" style="border-top:1px solid var(--rule)">
+            <select id="dGroup" style="flex:1;min-width:160px" aria-label="Group">${otherGroups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}</select>
+            <button class="small primary" type="button" data-act="addGroup">Share with group</button></div>` : ""}
+        </div>
+        <div class="panel section-gap">
           <div class="panel-head"><h2>Time on each page</h2><span class="muted small-text">All readers combined</span></div>
           <div class="panel-body">${pageCount ? `<div id="pageChart"></div>
             <details class="table-view"><summary>Show as a table</summary><div class="table-wrap"><table class="data"><thead><tr><th>Page</th><th class="num">Time</th></tr></thead>
             <tbody>${pageSec.map((v, i) => `<tr><td>Page ${i + 1}</td><td class="num">${fmtDuration(v)}</td></tr>`).join("")}</tbody></table></div></details>`
             : `<p class="muted small-text">Appears after someone opens the document in the app.</p>`}</div>
+        </div>
         </div>
       </div>
       <div class="panel section-gap">
@@ -422,13 +462,23 @@
       const msg = $("#addMsg");
       const { valid, invalid } = parseEmails($("#addEmails").value);
       if (invalid.length) { msg.className = "msg err"; msg.textContent = `Check these: ${invalid.join(", ")}`; return; }
-      const fresh = valid.filter(e => !allowed.includes(e));
+      const fresh = valid.filter(e => !direct.includes(e));
       if (!fresh.length) { msg.className = "msg err"; msg.textContent = "Those email IDs already have access."; return; }
       const { error } = await sb.from("document_access").insert(fresh.map(email => ({ document_id: d.id, email })));
       if (error) { msg.className = "msg err"; msg.textContent = error.message; return; }
       toast(`Added ${fresh.length} ${fresh.length === 1 ? "person" : "people"}`);
       await refresh();
     };
+    if (act("addGroup")) act("addGroup").onclick = async () => {
+      const { error } = await sb.from("group_documents").insert({ group_id: $("#dGroup").value, document_id: d.id });
+      if (error) return toast(error.message);
+      toast("Shared with the group"); await refresh();
+    };
+    $$("[data-ungroup]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("group_documents").delete().eq("group_id", b.dataset.ungroup).eq("document_id", d.id);
+      if (error) return toast(error.message);
+      toast("Group removed from this document"); await refresh();
+    });
     $$("[data-remove]", view).forEach(b => b.onclick = async () => {
       const email = b.dataset.remove;
       const { error } = await sb.from("document_access").delete().eq("document_id", d.id).eq("email", email);
@@ -462,83 +512,177 @@
   }
 
   // ---------------------------------------------------------------
-  // People
+  // People: list, groups, referral tree, access requests, profiles
   // ---------------------------------------------------------------
-  function people() {
+  const PEOPLE_TABS = [["", "People"], ["groups", "Groups"], ["tree", "Referral tree"], ["requests", "Access requests"]];
+  const peopleTabs = active => {
+    const pend = S.requests.filter(r => r.status === "pending").length;
+    return `<nav class="tabs" aria-label="People">${PEOPLE_TABS.map(([k, l]) =>
+      `<a href="#people${k ? "/" + k : ""}" ${k === active ? 'aria-current="page"' : ""}>${l}${k === "requests" && pend ? ` (${pend})` : ""}</a>`).join("")}</nav>`;
+  };
+  const r2Note = () => S.peopleV2 ? "" : `<div class="notice" style="margin-bottom:16px">Run <code>supabase/006_people.sql</code> in Supabase to switch on profiles, tags, notes, groups and access requests.</div>`;
+  const tagChips = tags => (tags || []).map(t => `<span class="tag plain">${esc(t)}</span>`).join(" ");
+
+  function people(tab = "") {
+    const pages = { "": peopleList, groups: groupsPage, tree: treePage, requests: requestsPage };
+    (pages[tab] || peopleList)();
+  }
+
+  function peopleList() {
+    const allTags = [...new Set(S.peopleRows.flatMap(p => p.tags || []))].sort();
     view.innerHTML = `
-      ${head("People", "Everyone you've shared with, and how much they've read.")}
+      ${head("People", "Everyone you've shared with, paid by, or who asked for access.")}
+      ${peopleTabs("")}${r2Note()}
       <div class="panel">
-        <div class="panel-head"><input type="search" id="q" placeholder="Search by email" style="max-width:320px" aria-label="Search people">
-          <label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="onlyUnopened"> Only people who haven't opened anything</label></div>
+        <div class="panel-head"><div class="row" style="flex:1">
+          <input type="search" id="q" placeholder="Search name, email or Outlier ID" style="max-width:300px" aria-label="Search people">
+          <select id="fTag" style="width:auto" aria-label="Filter by tag"><option value="">All tags</option>${allTags.map(t => `<option>${esc(t)}</option>`).join("")}</select>
+          <select id="fGroup" style="width:auto" aria-label="Filter by group"><option value="">All groups</option>${S.groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}</select>
+          <label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="onlyUnopened"> Haven't opened anything</label>
+        </div><span class="muted small-text" id="pplCount"></span></div>
         <div id="peopleTable"></div>
       </div>`;
     const draw = () => {
-      const q = $("#q").value.trim().toLowerCase();
-      const onlyUn = $("#onlyUnopened").checked;
-      const list = [...D.people.entries()].map(([email, p]) => {
-        const ss = D.sessByEmail.get(email) || [];
-        return { email, p, ss, secs: sum(ss, s => s.seconds), devices: new Set(ss.map(s => s.device_id).filter(Boolean)).size, last: ss[0]?.last_seen_at, live: ss.some(isLive) };
-      }).filter(r => r.email.includes(q) && (!onlyUn || !r.ss.length))
-        .sort((a, b) => (b.live - a.live) || ((b.last ? new Date(b.last) : 0) - (a.last ? new Date(a.last) : 0)) || a.email.localeCompare(b.email));
+      const q = $("#q").value.trim().toLowerCase(), tag = $("#fTag").value, grp = $("#fGroup").value, onlyUn = $("#onlyUnopened").checked;
+      const list = [...D.people.keys()].map(email => personSummary(email))
+        .filter(r => (!q || [r.email, r.name, r.outlierId].some(v => String(v || "").toLowerCase().includes(q)))
+          && (!tag || r.tags.includes(tag)) && (!grp || r.groups.some(g => g.id === grp)) && (!onlyUn || !r.sessions.length))
+        .sort((a, b) => (b.live - a.live) || ((b.lastActive ? new Date(b.lastActive) : 0) - (a.lastActive ? new Date(a.lastActive) : 0)) || a.email.localeCompare(b.email));
+      $("#pplCount").textContent = `${list.length} ${list.length === 1 ? "person" : "people"}`;
       $("#peopleTable").innerHTML = list.length ? `<div class="table-wrap"><table class="data">
-        <thead><tr><th>Person</th><th>Status</th><th class="num">Opened</th><th class="num">Reading time</th><th class="num hide-sm">Devices</th><th class="hide-sm">Last active</th></tr></thead>
+        <thead><tr><th>Person</th><th>Status</th><th class="num">Docs opened</th><th class="num">Reading</th><th class="num hide-sm">Paid</th><th class="hide-sm">Last active</th></tr></thead>
         <tbody>${list.map(r => `<tr class="clickable" tabindex="0" data-href="person/${encodeURIComponent(r.email)}">
-          <td><div class="row" style="gap:10px;flex-wrap:nowrap"><span class="avatar">${esc(initials(r.email))}</span><span class="cell-title">${esc(r.email)}</span></div></td>
-          <td>${D.blocked.has(r.email) ? `<span class="tag off">Blocked</span>` : r.live ? `<span class="tag now">Reading now</span>` : r.ss.length ? `<span class="tag live">Active</span>` : `<span class="tag warn">Not opened</span>`}</td>
-          <td class="num">${r.p.opened.size} of ${r.p.docs.size}</td>
+          <td><div class="row" style="gap:10px;flex-wrap:nowrap"><span class="avatar">${esc(initials(r.name || r.email))}</span>
+            <div><div class="cell-title">${esc(r.name || r.email)}</div>${r.name ? `<div class="cell-sub">${esc(r.email)}</div>` : ""}
+            ${r.tags.length || r.groups.length ? `<div class="flags">${tagChips(r.tags)} ${r.groups.map(g => `<span class="tag live">${esc(g.name)}</span>`).join(" ")}</div>` : ""}</div></div></td>
+          <td>${D.blocked.has(r.email) ? `<span class="tag off">Blocked</span>` : r.live ? `<span class="tag now">Reading now</span>` : r.sessions.length ? `<span class="tag live">Active</span>` : r.docs.size ? `<span class="tag warn">Not opened</span>` : `<span class="tag plain">No documents</span>`}</td>
+          <td class="num">${r.opened.size} of ${r.docs.size}</td>
           <td class="num">${r.secs ? fmtDuration(r.secs) : "–"}</td>
-          <td class="num hide-sm">${r.devices > 1 ? `<span class="tag warn">${r.devices}</span>` : r.devices || "–"}</td>
-          <td class="hide-sm muted">${r.last ? esc(timeAgo(r.last)) : "Never"}</td></tr>`).join("")}</tbody></table></div>`
-        : emptyState(D.people.size ? "No matches" : "No people yet", D.people.size ? "Try a different search." : "People appear here once you share a document with them.");
+          <td class="num hide-sm">${r.paid ? inr(r.paid) : "–"}</td>
+          <td class="hide-sm muted">${r.lastActive ? esc(timeAgo(r.lastActive)) : "Never"}</td></tr>`).join("")}</tbody></table></div>`
+        : emptyState(D.people.size ? "No matches" : "No people yet", D.people.size ? "Try a different search or filter." : "People appear here once you share a document with them.");
       wireCommon();
     };
+    ["fTag", "fGroup", "onlyUnopened"].forEach(id => $(`#${id}`).onchange = draw);
     $("#q").oninput = draw;
-    $("#onlyUnopened").onchange = draw;
     draw();
   }
 
+  // Everything known about one person, from every table.
+  function personSummary(email) {
+    const p = D.people.get(email) || { docs: new Set(), opened: new Set() };
+    const row = S.peopleRows.find(x => x.email === email) || null;
+    const pays = S.payments.filter(x => x.email === email);
+    const sessions = D.sessByEmail.get(email) || [];
+    const name = row?.display_name || pays[0]?.name || S.requests.find(x => x.email === email)?.name || "";
+    const lastActive = [sessions[0]?.last_seen_at, pays[0]?.created_at].filter(Boolean).sort().pop();
+    return {
+      email, row, name, tags: row?.tags || [], notes: row?.notes || "", outlierId: pays[0]?.outlier_id || "",
+      referrer: referrerOf(email), referredText: pays.find(x => x.referred_by)?.referred_by || "",
+      groups: S.groups.filter(g => g.group_members.some(m => m.email === email)),
+      docs: p.docs, opened: p.opened, sessions, secs: sum(sessions, s => s.seconds), live: sessions.some(isLive),
+      pays, paid: sum(pays.filter(x => x.status !== "rejected"), x => Number(x.amount_sent)),
+      earned: sum(pays.filter(x => x.status !== "rejected"), x => Number(x.amount_earned)), lastActive
+    };
+  }
+
+  // Referrer: set by you on the profile, otherwise matched from the "referred by" the person typed.
+  function referrerOf(email) {
+    const row = S.peopleRows.find(x => x.email === email);
+    if (row?.referred_by_email) return row.referred_by_email;
+    const text = (S.payments.find(x => x.email === email && x.referred_by)?.referred_by || "").trim().toLowerCase();
+    if (!text) return null;
+    if (text.includes("@")) return D.people.has(text) && text !== email ? text : null;
+    for (const e of D.people.keys()) {
+      if (e === email) continue;
+      const n = (S.peopleRows.find(x => x.email === e)?.display_name || S.payments.find(x => x.email === e)?.name || "").trim().toLowerCase();
+      if (n && n === text) return e;
+    }
+    return null;
+  }
+  const nameOf = email => S.peopleRows.find(x => x.email === email)?.display_name || S.payments.find(x => x.email === email)?.name || email;
+
   function personDetail(emailArg) {
     const email = decodeURIComponent(emailArg || "");
-    const p = D.people.get(email) || { docs: new Set(), opened: new Set() };
-    const ss = D.sessByEmail.get(email) || [];
+    const r = personSummary(email);
     const blocked = D.blocked.has(email);
-    const devices = groupBy(ss.filter(s => s.device_id), s => s.device_id);
-    const docIds = [...new Set([...p.docs, ...p.opened])];
+    const devices = groupBy(r.sessions.filter(s => s.device_id), s => s.device_id);
+    const docIds = [...new Set([...r.docs, ...r.opened])];
+    const directDocs = new Set(S.docs.filter(d => d.document_access.some(a => a.email === email)).map(d => d.id));
+    const team = descendants(email);
+    const others = [...D.people.keys()].filter(e => e !== email).sort();
 
     view.innerHTML = `
-      ${head(email, blocked ? `<span class="tag off">Blocked</span>&nbsp; Can't open any document` : `${p.docs.size} ${p.docs.size === 1 ? "document" : "documents"} shared with this person`,
+      ${head(r.name || email, `${blocked ? `<span class="tag off">Blocked</span>&nbsp; ` : ""}${esc(email)}${r.outlierId ? `, Outlier ID ${esc(r.outlierId)}` : ""}`,
         `${blocked ? `<button type="button" data-act="unblock">Unblock</button>` : `<button type="button" class="danger" data-act="block">Block</button>`}
-         ${p.docs.size ? `<button type="button" data-act="removeAll">Remove from all documents</button>` : ""}`,
+         ${directDocs.size ? `<button type="button" data-act="removeAll">Remove from all documents</button>` : ""}`,
         backLink("#people", "People"))}
       <div class="kpis">
-        ${kpi("Reading time", fmtDuration(sum(ss, s => s.seconds)), `${ss.length} ${ss.length === 1 ? "session" : "sessions"}`)}
-        ${kpi("Documents opened", `${p.opened.size} of ${p.docs.size}`, p.docs.size - [...p.docs].filter(id => p.opened.has(id)).length ? `${p.docs.size - [...p.docs].filter(id => p.opened.has(id)).length} not opened yet` : "Opened everything shared")}
-        ${kpi("Devices used", devices.size || "–", devices.size > 1 ? "More than one phone" : devices.size ? "One phone" : "None yet")}
-        ${kpi("Last active", ss[0] ? esc(timeAgo(ss[0].last_seen_at)) : "Never", ss[0] ? esc(fmtDate(ss[0].last_seen_at)) : "")}
+        ${kpi("Reading time", fmtDuration(r.secs), `${r.sessions.length} ${r.sessions.length === 1 ? "session" : "sessions"}, ${r.opened.size} of ${r.docs.size} documents`)}
+        ${kpi("Paid", inr(r.paid), r.earned ? `of ${inr(r.earned)} earned (${pctTxt(r.earned ? (r.paid / r.earned) * 100 : null)})` : "No payments yet")}
+        ${kpi("Team", team.length, team.length ? `${inr(sum(team, e => personSummary(e).earned))} team earnings` : "Hasn't referred anyone")}
+        ${kpi("Last active", r.lastActive ? esc(timeAgo(r.lastActive)) : "Never", devices.size > 1 ? `${devices.size} phones used` : devices.size ? "One phone" : "No app use yet")}
       </div>
       <div class="grid-2">
-        <div class="panel">
-          <div class="panel-head"><h2>Documents</h2></div>
-          ${docIds.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Document</th><th class="num">Time</th><th class="num hide-sm">Furthest page</th><th class="hide-sm">Last opened</th></tr></thead>
-          <tbody>${docIds.map(id => {
-            const mine = ss.filter(s => s.document_id === id);
-            const pc = Math.max(0, ...mine.map(s => s.page_count || 0));
-            return `<tr class="clickable" tabindex="0" data-href="doc/${id}"><td><div class="cell-title">${esc(docTitle(id))}</div>${p.docs.has(id) ? "" : `<div class="cell-sub">Access removed</div>`}</td>
-              <td class="num">${mine.length ? fmtDuration(sum(mine, s => s.seconds)) : "–"}</td>
-              <td class="num hide-sm">${mine.length ? `${Math.max(...mine.map(s => s.max_page))} of ${pc}` : "–"}</td>
-              <td class="hide-sm muted">${mine[0] ? esc(timeAgo(mine[0].last_seen_at)) : "Not opened yet"}</td></tr>`;
-          }).join("")}</tbody></table></div>` : emptyState("No documents", "Nothing is shared with this email.")}
+        <div>
+          <div class="panel">
+            <div class="panel-head"><h2>Profile</h2><span class="muted small-text">Only admins see this</span></div>
+            <div class="panel-body">
+              <div class="form-grid">
+                <div><label for="prName" style="margin-top:0">Name</label><input id="prName" type="text" maxlength="120" value="${esc(r.row?.display_name || r.name)}"></div>
+                <div><label for="prRef" style="margin-top:0">Referred by</label>
+                  <select id="prRef"><option value="">Nobody / not known</option>${others.map(e => `<option value="${esc(e)}" ${r.referrer === e ? "selected" : ""}>${esc(nameOf(e))}${nameOf(e) !== e ? ` (${esc(e)})` : ""}</option>`).join("")}</select>
+                  ${r.referredText ? `<p class="hint">They wrote: "${esc(r.referredText)}"${r.row?.referred_by_email ? "" : r.referrer ? " (matched automatically)" : " (no match yet, pick the right person)"}</p>` : ""}</div>
+              </div>
+              <label for="prTags">Tags</label>
+              <input id="prTags" type="text" maxlength="300" placeholder="e.g. active, needs follow-up, top performer" value="${esc(r.tags.join(", "))}">
+              <p class="hint">Separate with commas.${S.peopleRows.flatMap(x => x.tags || []).length ? ` Used so far: ${esc([...new Set(S.peopleRows.flatMap(x => x.tags || []))].slice(0, 12).join(", "))}` : ""}</p>
+              <label for="prNotes">Notes</label>
+              <textarea id="prNotes" rows="4" maxlength="5000" placeholder="Anything you want to remember about this person">${esc(r.notes)}</textarea>
+              <div class="row" style="margin-top:12px"><button class="primary small" type="button" data-act="saveProfile" ${S.peopleV2 ? "" : "disabled"}>Save profile</button></div>
+            </div>
+          </div>
+          <div class="panel section-gap">
+            <div class="panel-head"><h2>Groups</h2></div>
+            <div class="panel-body">${S.groups.length ? `<div class="check-list">${S.groups.map(g => `<label class="row" style="margin:0;gap:8px;font-weight:400">
+              <input type="checkbox" data-group="${g.id}" ${r.groups.some(x => x.id === g.id) ? "checked" : ""}> ${esc(g.name)}
+              <span class="muted small-text">${g.group_documents.length} ${g.group_documents.length === 1 ? "document" : "documents"}</span></label>`).join("")}</div>`
+              : `<p class="muted small-text">No groups yet. <a href="#people/groups">Create one</a>.</p>`}</div>
+          </div>
         </div>
-        <div class="panel">
-          <div class="panel-head"><h2>Devices</h2></div>
-          ${devices.size ? `<ul class="feed">${[...devices.values()].map(list => `
-            <li><span class="avatar">${icon("phone")}</span><div><div class="what">${esc(list[0].device_label || "Android phone")}</div>
-            <div class="when">${list.length} ${list.length === 1 ? "session" : "sessions"}, last used ${esc(timeAgo(list[0].last_seen_at))}</div></div></li>`).join("")}</ul>
-            ${devices.size > 1 ? `<div class="panel-body small-text muted" style="border-top:1px solid var(--rule)">Opened on more than one phone. That can mean a new phone, or a shared Google account.</div>` : ""}`
-            : emptyState("No devices yet", "Shows once this person opens a document.")}
+        <div>
+          <div class="panel">
+            <div class="panel-head"><h2>Documents</h2></div>
+            ${docIds.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Document</th><th class="num">Time</th><th class="num hide-sm">Furthest</th></tr></thead>
+            <tbody>${docIds.map(id => {
+              const mine = r.sessions.filter(s => s.document_id === id);
+              const pc = Math.max(0, ...mine.map(s => s.page_count || 0));
+              const via = directDocs.has(id) ? "" : r.docs.has(id) ? `via ${S.groups.filter(g => g.group_documents.some(x => x.document_id === id) && r.groups.some(y => y.id === g.id)).map(g => g.name).join(", ")}` : "Access removed";
+              return `<tr class="clickable" tabindex="0" data-href="doc/${id}"><td><div class="cell-title">${esc(docTitle(id))}</div>${via ? `<div class="cell-sub">${esc(via)}</div>` : ""}</td>
+                <td class="num">${mine.length ? fmtDuration(sum(mine, s => s.seconds)) : "–"}</td>
+                <td class="num hide-sm">${mine.length ? `${Math.max(...mine.map(s => s.max_page))} of ${pc}` : "–"}</td></tr>`;
+            }).join("")}</tbody></table></div>` : emptyState("No documents", "Nothing is shared with this email.")}
+          </div>
+          <div class="panel section-gap">
+            <div class="panel-head"><h2>Payments</h2>${r.pays.length ? `<a class="small-text" href="#payments">All payments</a>` : ""}</div>
+            ${r.pays.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Payout</th><th class="num">Earned</th><th class="num">Paid</th><th>Status</th></tr></thead>
+              <tbody>${r.pays.slice(0, 20).map(p => `<tr class="clickable" tabindex="0" data-href="payment/${p.id}">
+                <td class="muted">${esc(payDay(p).toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</td>
+                <td class="num">${inr(p.amount_earned)}</td><td class="num">${inr(p.amount_sent)}</td><td>${payTag(p.status)}</td></tr>`).join("")}</tbody></table></div>`
+              : emptyState("No payments", "Submissions from this person appear here.")}
+          </div>
+          <div class="panel section-gap">
+            <div class="panel-head"><h2>Devices</h2></div>
+            ${devices.size ? `<ul class="feed">${[...devices.values()].map(list => `
+              <li><span class="avatar">${icon("phone")}</span><div><div class="what">${esc(list[0].device_label || "Android phone")}</div>
+              <div class="when">${list.length} ${list.length === 1 ? "session" : "sessions"}, last used ${esc(timeAgo(list[0].last_seen_at))}</div></div></li>`).join("")}</ul>`
+              : emptyState("No devices yet", "Shows once this person opens a document.")}
+          </div>
+          ${team.length ? `<div class="panel section-gap"><div class="panel-head"><h2>Their team</h2><a class="small-text" href="#people/tree">Referral tree</a></div>
+            <ul class="rank">${team.slice(0, 30).map(e => `<li><a href="#person/${encodeURIComponent(e)}">${esc(nameOf(e))}</a><span class="v">${inr(personSummary(e).earned)}</span></li>`).join("")}</ul></div>` : ""}
         </div>
       </div>
-      <div class="panel section-gap"><div class="panel-head"><h2>Sessions</h2></div>${sessionTable(ss.slice(0, 100), { showEmail: false })}</div>`;
+      <div class="panel section-gap"><div class="panel-head"><h2>Reading sessions</h2></div>${sessionTable(r.sessions.slice(0, 50), { showEmail: false })}</div>`;
 
     const act = n => $(`[data-act="${n}"]`, view);
     if (act("block")) act("block").onclick = () => blockDialog(email);
@@ -549,7 +693,7 @@
     };
     if (act("removeAll")) act("removeAll").onclick = () => confirmDialog({
       title: `Remove ${email} from every document?`,
-      text: `They lose access to all ${p.docs.size} documents. Their reading history stays.`,
+      text: `They lose direct access to ${directDocs.size} ${directDocs.size === 1 ? "document" : "documents"}. Access through groups stays until you take them out of the group. Their history stays.`,
       confirm: "Remove access", danger: true,
       run: async () => {
         const { error } = await sb.from("document_access").delete().eq("email", email);
@@ -557,7 +701,223 @@
         toast("Access removed"); await refresh();
       }
     });
+    act("saveProfile").onclick = async () => {
+      const tags = [...new Set($("#prTags").value.split(",").map(t => t.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+      const { error } = await sb.from("people").upsert({
+        email, display_name: $("#prName").value.trim() || null, referred_by_email: $("#prRef").value || null,
+        tags, notes: $("#prNotes").value.trim() || null, updated_at: new Date().toISOString()
+      });
+      if (error) return toast(error.message);
+      toast("Profile saved"); await refresh();
+    };
+    $$("[data-group]", view).forEach(cb => cb.onchange = async () => {
+      const gid = cb.dataset.group;
+      const { error } = cb.checked
+        ? await sb.from("group_members").insert({ group_id: gid, email })
+        : await sb.from("group_members").delete().eq("group_id", gid).eq("email", email);
+      if (error) { cb.checked = !cb.checked; return toast(error.message); }
+      toast(cb.checked ? "Added to group" : "Removed from group"); await refresh();
+    });
     wireCommon();
+  }
+
+  // ---------- groups ----------
+  function groupsPage() {
+    view.innerHTML = `
+      ${head("People", "Share documents with a whole group. Anyone you add later gets access automatically.",
+        S.peopleV2 ? `<button class="primary" type="button" data-act="newGroup">New group</button>` : "")}
+      ${peopleTabs("groups")}${r2Note()}
+      <div class="panel">${S.groups.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Group</th><th class="num">Members</th><th class="num">Documents</th><th class="num hide-sm">Paid by members</th></tr></thead>
+        <tbody>${S.groups.map(g => `<tr class="clickable" tabindex="0" data-href="group/${g.id}">
+          <td><div class="cell-title">${esc(g.name)}</div>${g.description ? `<div class="cell-sub">${esc(g.description)}</div>` : ""}</td>
+          <td class="num">${g.group_members.length}</td><td class="num">${g.group_documents.length}</td>
+          <td class="num hide-sm">${inr(sum(g.group_members, m => personSummary(m.email).paid))}</td></tr>`).join("")}</tbody></table></div>`
+        : emptyState("No groups yet", "Make groups like \"Batch 3\" or \"Referred by Hrsh\".")}</div>`;
+    const b = $('[data-act="newGroup"]'); if (b) b.onclick = () => groupDialog(null);
+    wireCommon();
+  }
+
+  function groupDialog(g) {
+    openDialog(`
+      <div class="dlg-head"><h2>${g ? "Edit group" : "New group"}</h2></div>
+      <div class="dlg-body">
+        <label for="gName">Name</label><input id="gName" type="text" required maxlength="80" placeholder="e.g. Batch 3" value="${esc(g?.name || "")}">
+        <label for="gDesc">Description (optional)</label><input id="gDesc" type="text" maxlength="300" value="${esc(g?.description || "")}">
+        ${g ? "" : `<label for="gEmails">Members (optional)</label><textarea id="gEmails" placeholder="Paste email IDs, separated by commas or new lines"></textarea>`}
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">${g ? "Save" : "Create group"}</button></div>`,
+      async () => {
+        const name = $("#gName").value.trim(), description = $("#gDesc").value.trim() || null;
+        if (g) {
+          const { error } = await sb.from("groups").update({ name, description }).eq("id", g.id);
+          if (error) throw error;
+          dlg.close(); toast("Group saved"); await refresh(); return;
+        }
+        const { valid, invalid } = parseEmails($("#gEmails").value);
+        if (invalid.length) throw new Error(`Check these email IDs: ${invalid.join(", ")}`);
+        const { data, error } = await sb.from("groups").insert({ name, description }).select("id").single();
+        if (error) throw new Error(/duplicate/.test(error.message) ? "A group with that name already exists." : error.message);
+        if (valid.length) {
+          const { error: e2 } = await sb.from("group_members").insert(valid.map(email => ({ group_id: data.id, email })));
+          if (e2) throw e2;
+        }
+        dlg.close(); toast("Group created"); await refresh(); location.hash = `group/${data.id}`;
+      });
+  }
+
+  function groupDetail(id) {
+    const g = S.groups.find(x => x.id === id);
+    if (!g) { view.innerHTML = head("Group not found", "It may have been deleted.", "", backLink("#people/groups", "Groups")); return; }
+    const members = g.group_members.map(m => m.email).sort();
+    const docIds = g.group_documents.map(x => x.document_id);
+    const otherDocs = S.docs.filter(d => !docIds.includes(d.id));
+    view.innerHTML = `
+      ${head(g.name, g.description ? esc(g.description) : `${members.length} members, ${docIds.length} documents`,
+        `<button type="button" data-act="editGroup">Edit</button><button type="button" class="danger" data-act="delGroup">Delete group</button>`,
+        backLink("#people/groups", "Groups"))}
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Members</h2><span class="muted small-text">${members.length}</span></div>
+          ${members.length ? `<div class="table-wrap"><table class="data"><tbody>${members.map(e => {
+            const r = personSummary(e);
+            return `<tr><td><a class="cell-title" href="#person/${encodeURIComponent(e)}">${esc(r.name || e)}</a><div class="cell-sub">${esc(e)}</div></td>
+              <td class="num hide-sm">${r.secs ? fmtDuration(r.secs) : "–"}</td>
+              <td class="num"><button class="small ghost" type="button" data-unmember="${esc(e)}">Remove</button></td></tr>`;
+          }).join("")}</tbody></table></div>` : emptyState("No members yet", "Add email IDs below.")}
+          <div class="panel-body" style="border-top:1px solid var(--rule)">
+            <label for="gAdd" style="margin-top:0">Add members</label>
+            <textarea id="gAdd" rows="3" style="min-height:72px" placeholder="Paste email IDs, separated by commas or new lines"></textarea>
+            <div class="row" style="margin-top:10px"><button class="primary small" type="button" data-act="addMembers">Add to group</button><span id="gMsg" class="msg" style="margin:0"></span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Documents</h2><span class="muted small-text">Every member can open these</span></div>
+          ${docIds.length ? `<ul class="rank">${docIds.map(did => `<li><a href="#doc/${did}">${esc(docTitle(did))}</a>
+            <button class="small ghost" type="button" data-undoc="${did}">Remove</button></li>`).join("")}</ul>` : emptyState("No documents yet", "Pick one below.")}
+          ${otherDocs.length ? `<div class="panel-body row" style="border-top:1px solid var(--rule)">
+            <select id="gDoc" style="flex:1;min-width:180px" aria-label="Document to share">${otherDocs.map(d => `<option value="${d.id}">${esc(d.title)}</option>`).join("")}</select>
+            <button class="small primary" type="button" data-act="addDoc">Share with group</button></div>` : ""}
+        </div>
+      </div>`;
+    $('[data-act="editGroup"]').onclick = () => groupDialog(g);
+    $('[data-act="delGroup"]').onclick = () => confirmDialog({
+      title: `Delete "${g.name}"?`, text: "Members lose any access that came only from this group. People and documents are not deleted.",
+      confirm: "Delete group", danger: true,
+      run: async () => { const { error } = await sb.from("groups").delete().eq("id", g.id); if (error) throw error; toast("Group deleted"); location.hash = "people/groups"; await refresh(); }
+    });
+    $('[data-act="addMembers"]').onclick = async () => {
+      const msg = $("#gMsg");
+      const { valid, invalid } = parseEmails($("#gAdd").value);
+      if (invalid.length) { msg.className = "msg err"; msg.textContent = `Check these: ${invalid.join(", ")}`; return; }
+      const fresh = valid.filter(e => !members.includes(e));
+      if (!fresh.length) { msg.className = "msg err"; msg.textContent = "Those email IDs are already in the group."; return; }
+      const { error } = await sb.from("group_members").insert(fresh.map(email => ({ group_id: g.id, email })));
+      if (error) { msg.className = "msg err"; msg.textContent = error.message; return; }
+      toast(`Added ${fresh.length} ${fresh.length === 1 ? "person" : "people"}`); await refresh();
+    };
+    const addDoc = $('[data-act="addDoc"]');
+    if (addDoc) addDoc.onclick = async () => {
+      const { error } = await sb.from("group_documents").insert({ group_id: g.id, document_id: $("#gDoc").value });
+      if (error) return toast(error.message);
+      toast("Shared with the group"); await refresh();
+    };
+    $$("[data-unmember]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("group_members").delete().eq("group_id", g.id).eq("email", b.dataset.unmember);
+      if (error) return toast(error.message);
+      toast("Removed from group"); await refresh();
+    });
+    $$("[data-undoc]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("group_documents").delete().eq("group_id", g.id).eq("document_id", b.dataset.undoc);
+      if (error) return toast(error.message);
+      toast("Document removed from group"); await refresh();
+    });
+  }
+
+  // ---------- referral tree ----------
+  function descendants(email, seen = new Set()) {
+    const kids = [...D.people.keys()].filter(e => !seen.has(e) && referrerOf(e) === email);
+    kids.forEach(k => seen.add(k));
+    return kids.flatMap(k => [k, ...descendants(k, seen)]);
+  }
+
+  function treePage() {
+    const all = [...D.people.keys()];
+    const parent = new Map(all.map(e => [e, referrerOf(e)]));
+    const kids = new Map();
+    all.forEach(e => { const p = parent.get(e); if (p) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(e); } });
+    const roots = all.filter(e => kids.has(e) && !parent.get(e)).sort((a, b) => descendants(b).length - descendants(a).length);
+    const unmatched = all.filter(e => !parent.get(e)).map(e => ({ e, text: S.payments.find(x => x.email === e && x.referred_by)?.referred_by }))
+      .filter(x => x.text);
+    const node = (e, depth, seen) => {
+      if (seen.has(e) || depth > 12) return "";
+      seen.add(e);
+      const team = descendants(e);
+      const s = personSummary(e);
+      const children = (kids.get(e) || []).sort((a, b) => descendants(b).length - descendants(a).length);
+      return `<li><details ${depth < 2 ? "open" : ""}><summary>
+        <a href="#person/${encodeURIComponent(e)}" class="cell-title">${esc(s.name || e)}</a>
+        <span class="muted small-text">${team.length ? `team of ${team.length}, ${inr(sum(team, x => personSummary(x).earned))} team earnings` : `${inr(s.earned)} earned`}</span></summary>
+        ${children.length ? `<ul class="tree">${children.map(c => node(c, depth + 1, seen)).join("")}</ul>` : ""}</details></li>`;
+    };
+    view.innerHTML = `
+      ${head("People", "Who invited whom, from \"referred by\" on payments and the referrer you set on profiles.")}
+      ${peopleTabs("tree")}${r2Note()}
+      <div class="panel">${roots.length ? `<div class="panel-body"><ul class="tree root">${roots.map(r => node(r, 0, new Set())).join("")}</ul></div>`
+        : emptyState("No referrals linked yet", "When people fill in \"referred by\", or you set it on their profile, the tree appears here.")}</div>
+      ${unmatched.length ? `<div class="panel section-gap"><div class="panel-head"><h2>Referrers not matched yet</h2><span class="muted small-text">Open the person and pick the right referrer</span></div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Person</th><th>They wrote</th></tr></thead>
+        <tbody>${unmatched.map(x => `<tr class="clickable" tabindex="0" data-href="person/${encodeURIComponent(x.e)}"><td>${esc(nameOf(x.e))}<div class="cell-sub">${esc(x.e)}</div></td><td>${esc(x.text)}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
+    wireCommon();
+  }
+
+  // ---------- access requests ----------
+  function requestsPage() {
+    const pend = S.requests.filter(r => r.status === "pending");
+    const done = S.requests.filter(r => r.status !== "pending").slice(0, 50);
+    view.innerHTML = `
+      ${head("People", "People who signed in and asked for access.")}
+      ${peopleTabs("requests")}${r2Note()}
+      <div class="panel">
+        <div class="panel-head"><h2>Waiting</h2><span class="muted small-text">${pend.length}</span></div>
+        ${pend.length ? `<div class="table-wrap"><table class="data"><tbody>${pend.map(r => `<tr>
+          <td><div class="cell-title">${esc(r.name)}</div><div class="cell-sub">${esc(r.email)}, ${esc(timeAgo(r.created_at))}</div>${r.message ? `<div class="cell-sub">"${esc(r.message)}"</div>` : ""}</td>
+          <td class="num"><div class="row end"><button class="small primary" type="button" data-approve="${r.id}">Approve</button>
+            <button class="small" type="button" data-decline="${r.id}">Decline</button></div></td></tr>`).join("")}</tbody></table></div>`
+          : emptyState("No requests waiting", "When someone with no documents taps Request access in the app, they show up here.")}
+      </div>
+      ${done.length ? `<div class="panel section-gap"><div class="panel-head"><h2>Decided</h2></div><div class="table-wrap"><table class="data"><tbody>${done.map(r => `<tr>
+        <td><a href="#person/${encodeURIComponent(r.email)}">${esc(r.name)}</a><div class="cell-sub">${esc(r.email)}</div></td>
+        <td>${r.status === "approved" ? `<span class="tag live">Approved</span>` : `<span class="tag off">Declined</span>`}</td>
+        <td class="muted hide-sm">${esc(r.decided_by || "")}, ${esc(timeAgo(r.decided_at))}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
+    $$("[data-approve]", view).forEach(b => b.onclick = () => approveDialog(S.requests.find(r => r.id === b.dataset.approve)));
+    $$("[data-decline]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("access_requests").update({ status: "declined", decided_by: user.email, decided_at: new Date().toISOString() }).eq("id", b.dataset.decline);
+      if (error) return toast(error.message);
+      toast("Request declined"); await refresh();
+    });
+  }
+
+  function approveDialog(req) {
+    openDialog(`
+      <div class="dlg-head"><h2>Approve ${esc(req.name)}</h2><p class="sub" style="margin:6px 0 0">${esc(req.email)}. Choose what they can open.</p></div>
+      <div class="dlg-body">
+        ${S.groups.length ? `<label style="margin-top:6px">Add to groups</label><div class="check-list">${S.groups.map(g => `<label class="row" style="margin:0;gap:8px;font-weight:400"><input type="checkbox" name="apG" value="${g.id}"> ${esc(g.name)} <span class="muted small-text">${g.group_documents.length} docs</span></label>`).join("")}</div>` : ""}
+        <label>Give access to documents</label>
+        <div class="check-list" style="max-height:220px;overflow:auto">${S.docs.map(d => `<label class="row" style="margin:0;gap:8px;font-weight:400"><input type="checkbox" name="apD" value="${d.id}"> ${esc(d.title)}</label>`).join("") || `<p class="muted small-text">No documents yet.</p>`}</div>
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Approve</button></div>`,
+      async () => {
+        const gs = $$('input[name="apG"]:checked', dlg).map(i => i.value), ds = $$('input[name="apD"]:checked', dlg).map(i => i.value);
+        if (!gs.length && !ds.length) throw new Error("Pick at least one group or document.");
+        if (gs.length) { const { error } = await sb.from("group_members").upsert(gs.map(group_id => ({ group_id, email: req.email })), { onConflict: "group_id,email", ignoreDuplicates: true }); if (error) throw error; }
+        if (ds.length) { const { error } = await sb.from("document_access").upsert(ds.map(document_id => ({ document_id, email: req.email })), { onConflict: "document_id,email", ignoreDuplicates: true }); if (error) throw error; }
+        const { error } = await sb.from("access_requests").update({ status: "approved", decided_by: user.email, decided_at: new Date().toISOString() }).eq("id", req.id);
+        if (error) throw error;
+        dlg.close(); toast(`${req.name} approved`); await refresh();
+      });
   }
 
   // ---------------------------------------------------------------
