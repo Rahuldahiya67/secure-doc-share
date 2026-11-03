@@ -48,7 +48,7 @@
 
   function brandHTML(sub) {
     return `<a class="brand" href="./"><span class="brand-seal">${icon("seal")}</span>
-      <span>${esc(cfg.appName || "Secure Doc Share")}${sub ? `<small>${esc(sub)}</small>` : ""}</span></a>`;
+      <span>${esc(cfg.appName || "Pro AI Trainers")}${sub ? `<small>${esc(sub)}</small>` : ""}</span></a>`;
   }
 
   // ---------- formatting ----------

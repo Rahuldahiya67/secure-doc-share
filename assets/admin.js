@@ -1768,7 +1768,7 @@
     const never = [...D.people.keys()].filter(e => !sentIn.has(e) && !D.blocked.has(e) && !S.payments.some(p => p.email === e)).sort();
     const daysLeft = Math.ceil((now.end - Date.now()) / 864e5);
     const dueText = daysLeft <= 1 ? (new Date().getDay() === S.payDay ? "today" : "tomorrow") : `in ${daysLeft} days`;
-    const reminder = `Hi, a reminder that payments are due every ${now.dayName}. Please submit this week's payment by ${now.label} in the Secure Doc Share app (Submit a payment).`;
+    const reminder = `Hi, a reminder that payments are due every ${now.dayName}. Please submit this week's payment by ${now.label} in the Pro AI Trainers app (Submit a payment).`;
     const list = (emails, note) => `<ul class="rank">${emails.map(e => { const l = lastPaid(e); return `<li><span><a href="#person/${encodeURIComponent(e)}">${esc(nameFor(e))}</a><span class="cell-sub">${esc(e)}</span></span>
       <span class="v">${l ? inr(l.amount_sent) : "–"}<span class="cell-sub" style="text-align:right">${l ? `last paid ${esc(timeAgo(l.created_at))}` : note}</span></span></li>`; }).join("")}</ul>`;
 
@@ -2207,7 +2207,7 @@
 
   function remindDialog(d, behind, pageCount) {
     const notOpened = behind.filter(r => !r.mine.length), unfinished = behind.filter(r => r.mine.length);
-    const text = `Hi, a reminder to read "${d.title}"${pageCount ? ` (${pageCount} pages)` : ""}${d.expires_at ? `. It's available until ${new Date(d.expires_at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}` : ""}.\n\nOpen it in the Secure Doc Share app:\n${shareLink(d.id)}`;
+    const text = `Hi, a reminder to read "${d.title}"${pageCount ? ` (${pageCount} pages)` : ""}${d.expires_at ? `. It's available until ${new Date(d.expires_at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}` : ""}.\n\nOpen it in the Pro AI Trainers app:\n${shareLink(d.id)}`;
     const list = rs => rs.map(r => `<li>${esc(nameOf(r.email))}${nameOf(r.email) !== r.email ? ` <span class="muted small-text">${esc(r.email)}</span>` : ""}${r.mine.length ? ` <span class="muted small-text">page ${r.furthest} of ${pageCount}</span>` : ""}</li>`).join("");
     openDialog(`
       <div class="dlg-head"><h2>Remind people</h2><p class="sub" style="margin:6px 0 0">Copy the message, or open your email with everyone in BCC. Nothing is sent until you send it.</p></div>

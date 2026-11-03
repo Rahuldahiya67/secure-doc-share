@@ -4,7 +4,7 @@
 window.APP_CONFIG = {
   supabaseUrl: "https://dxtiqafewxazqivmqaqj.supabase.co",
   supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR4dGlxYWZld3hhenFpdm1xYXFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwODAyMTksImV4cCI6MjEwNzY1NjIxOX0.B-VMbWqrcEwgYfiGOjYeCGsGX4YLH18a3jpV_mabRuM",
-  appName: "Secure Doc Share",
+  appName: "Pro AI Trainers",
   signedUrlSeconds: 60, // how long a file download link stays valid
 
   // Android app (viewing is only allowed inside the app)

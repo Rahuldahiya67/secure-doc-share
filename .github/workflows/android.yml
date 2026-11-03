@@ -58,7 +58,7 @@ jobs:
           tag_name: app-v${{ github.run_number }}
           name: Android app v${{ github.run_number }}
           body: |
-            Secure Doc Share Android viewer. Screenshots and screen recording are blocked inside the app.
+            Pro AI Trainers Android app. Screenshots and screen recording are blocked inside the app.
             Download **SecureDocShare.apk** below on your Android phone and install it.
           files: SecureDocShare.apk
           make_latest: true

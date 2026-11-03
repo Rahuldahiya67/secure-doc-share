@@ -277,7 +277,7 @@
       <div class="card narrow">
         ${brandHTML()}
         <h2>Open this in the app</h2>
-        <p class="sub">Shared documents open only in the Secure Doc Share app, which blocks screenshots and screen recording.</p>
+        <p class="sub">Shared documents open only in the Pro AI Trainers app, which blocks screenshots and screen recording.</p>
         <a class="btn primary full" href="${esc(intentUrl)}">Open in app</a>
         <div class="divider">first time here?</div>
         <a class="btn full" href="${esc(apk)}">Download the app</a>
@@ -290,7 +290,7 @@
       <div class="card narrow">
         ${brandHTML()}
         <h2>Open this link on an Android phone</h2>
-        <p class="sub">Shared documents can only be read in the Secure Doc Share app for Android.</p>
+        <p class="sub">Shared documents can only be read in the Pro AI Trainers app for Android.</p>
         <div class="notice">Send this link to your Android phone and open it there to install the app.</div>
       </div>`;
   }

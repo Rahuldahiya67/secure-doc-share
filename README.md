@@ -1,4 +1,4 @@
-# Secure Doc Share
+# Pro AI Trainers
 
 A free, self-hosted way to share PDFs with **only the email IDs you allow**, in the spirit of Papermark or DocSend.
 
@@ -65,7 +65,7 @@ Go to **Settings → Pages → Build and deployment**, choose **Deploy from a br
 
 ## Android-only viewing (blocks screenshots)
 
-Viewers can only open documents in the **Secure Doc Share Android app** (`android/`). It's a small WebView app with Android's `FLAG_SECURE` switched on, so the phone refuses screenshots and screen recordings and hides the app in the recent-apps view.
+Viewers can only open documents in the **Pro AI Trainers Android app** (`android/`). It's a small WebView app with Android's `FLAG_SECURE` switched on, so the phone refuses screenshots and screen recordings and hides the app in the recent-apps view.
 
 - **Opening a link in a browser** shows an "Open in app" screen with an APK download. It does not open the document.
 - **The database enforces it.** `supabase/002_android_only.sql` makes viewers call `start_view()` with the app key before storage will release a file. A browser has no key and is refused.

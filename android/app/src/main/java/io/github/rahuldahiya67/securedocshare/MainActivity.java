@@ -25,9 +25,9 @@ import android.webkit.WebViewClient;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Secure Doc Share viewer.
+ * Pro AI Trainers document viewer.
  *
- * A WebView around the Secure Doc Share site with FLAG_SECURE switched on, so
+ * A WebView around the Pro AI Trainers site with FLAG_SECURE switched on, so
  * Android blocks screenshots, screen recording and the recent-apps preview.
  * The page gets a small JavaScript bridge ("SecureDocApp") that provides the
  * app key the database requires before it will hand out a document.
@@ -186,7 +186,7 @@ public class MainActivity extends Activity {
         try {
             DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
             DownloadManager.Request r = new DownloadManager.Request(u);
-            r.setTitle("Secure Doc Share update");
+            r.setTitle("Pro AI Trainers update");
             r.setMimeType(APK_MIME);
             r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS,
