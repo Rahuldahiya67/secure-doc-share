@@ -306,8 +306,12 @@
 
     let deviceId = "";
     try {
-      deviceId = localStorage.getItem("deviceId") || "";
-      if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem("deviceId", deviceId); }
+      const hw = typeof window.SecureDocApp?.deviceId === "function" ? window.SecureDocApp.deviceId() : "";
+      if (hw) deviceId = `a:${hw}`;
+      else {
+        deviceId = localStorage.getItem("deviceId") || "";
+        if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem("deviceId", deviceId); }
+      }
     } catch (_) {}
     const label = deviceLabel();
 

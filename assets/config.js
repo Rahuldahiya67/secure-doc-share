@@ -10,5 +10,6 @@ window.APP_CONFIG = {
   // Android app (viewing is only allowed inside the app)
   androidPackage: "io.github.rahuldahiya67.securedocshare",
   appScheme: "securedocshare",
-  apkUrl: "https://github.com/Rahuldahiya67/secure-doc-share/releases/latest/download/SecureDocShare.apk"
+  apkUrl: "https://github.com/Rahuldahiya67/secure-doc-share/releases/latest/download/SecureDocShare.apk",
+  latestReleaseApi: "https://api.github.com/repos/Rahuldahiya67/secure-doc-share/releases/latest"
 };

@@ -167,6 +167,42 @@
     };
   }
 
+  // In the app: offer a one-tap update when GitHub has a newer build.
+  async function checkAppUpdate() {
+    if (!inApp || !cfg.latestReleaseApi) return;
+    const app = window.SecureDocApp;
+    const current = typeof app.appVersion === "function" ? Number(app.appVersion()) : 0;
+    let latest = 0;
+    try {
+      const cached = JSON.parse(sessionStorage.getItem("latestApp") || "null");
+      if (cached && Date.now() - cached.at < 30 * 60e3) latest = cached.v;
+      else {
+        const r = await fetch(cfg.latestReleaseApi, { headers: { Accept: "application/vnd.github+json" } });
+        if (r.ok) {
+          const j = await r.json();
+          latest = Number(String(j.tag_name || "").replace(/^app-v/, "")) || 0;
+          sessionStorage.setItem("latestApp", JSON.stringify({ v: latest, at: Date.now() }));
+        }
+      }
+    } catch (_) { return; }
+    if (!latest || latest <= current || $("#updateBar")) return;
+    const bar = document.createElement("div");
+    bar.id = "updateBar";
+    bar.className = "update-bar";
+    bar.innerHTML = `<span>A new version of the app is ready.</span><button type="button" class="small primary">Update now</button>`;
+    const header = $("#bar");
+    if (header && header.parentNode) header.after(bar); else document.body.prepend(bar);
+    $("button", bar).onclick = () => {
+      if (typeof app.installUpdate === "function") {
+        app.installUpdate(cfg.apkUrl);
+        bar.querySelector("span").textContent = "Downloading… Tap Install when Android asks.";
+      } else {
+        app.openExternal(cfg.apkUrl);
+        bar.querySelector("span").textContent = "Downloading in your browser. Open it from your notifications and tap Install.";
+      }
+    };
+  }
+
   function renderHeader(user, extra = "") {
     const bar = $("#bar");
     if (!bar) return;
@@ -187,6 +223,8 @@
     const { data } = await sb.auth.getSession();
     return data.session?.user ?? null;
   }
+
+  checkAppUpdate();
 
   window.App = {
     sb, cfg, configured, inApp, $, $$, esc, icon, brandHTML, fmtDuration, timeAgo, fmtDate, initials, toast,

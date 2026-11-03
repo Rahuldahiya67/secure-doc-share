@@ -452,3 +452,10 @@ code.upi { font-size: 14px; padding: 4px 8px; overflow-wrap: anywhere; }
 }
 .rank .cell-sub { display: block; }
 .rank > li > span:first-child { min-width: 0; }
+
+/* ---------- App update bar ---------- */
+.update-bar {
+  position: sticky; top: 57px; z-index: 19; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px; background: var(--seal); color: var(--seal-ink); font-size: 14px; font-weight: 500;
+}
+.update-bar button.primary { background: var(--seal-ink); color: var(--seal); border-color: var(--seal-ink); }

@@ -2,7 +2,14 @@ package io.github.rahuldahiya67.securedocshare;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.WindowManager;
@@ -33,6 +40,10 @@ public class MainActivity extends Activity {
     private static final String SCHEME = "securedocshare";
 
     private static final int PICK_FILE = 4201;
+    private static final String APK_MIME = "application/vnd.android.package-archive";
+
+    private long updateDownloadId = -1;
+    private BroadcastReceiver downloadReceiver;
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -96,6 +107,7 @@ public class MainActivity extends Activity {
         web.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> openExternal(url));
 
         setContentView(web);
+        registerUpdateReceiver();
 
         if (savedInstanceState != null) {
             web.restoreState(savedInstanceState);
@@ -142,10 +154,70 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (downloadReceiver != null) {
+            try { unregisterReceiver(downloadReceiver); } catch (Exception ignored) { }
+        }
         if (web != null) {
             web.destroy();
         }
         super.onDestroy();
+    }
+
+    // ---------- one-tap updates ----------
+
+    /** Download the new APK from the GitHub release, then open Android's installer. */
+    private void startUpdate(String url) {
+        Uri u;
+        try { u = Uri.parse(url); } catch (Exception e) { return; }
+        if (!"https".equals(u.getScheme()) || !"github.com".equals(u.getHost())) return;
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            DownloadManager.Request r = new DownloadManager.Request(u);
+            r.setTitle("Secure Doc Share update");
+            r.setMimeType(APK_MIME);
+            r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS,
+                    "SecureDocShare-" + System.currentTimeMillis() + ".apk");
+            updateDownloadId = dm.enqueue(r);
+            Toast.makeText(this, "Downloading the update…", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            openExternal(url);   // fall back to the browser download
+        }
+    }
+
+    private void registerUpdateReceiver() {
+        downloadReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                if (id == -1 || id != updateDownloadId) return;
+                updateDownloadId = -1;
+                try {
+                    DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                    Uri apk = dm.getUriForDownloadedFile(id);
+                    if (apk == null) {
+                        Toast.makeText(MainActivity.this, "The download didn't finish. Try again.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    Intent install = new Intent(Intent.ACTION_VIEW);
+                    install.setDataAndType(apk, APK_MIME);
+                    install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(install);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "Couldn't open the installer. Open the download from your notifications.", Toast.LENGTH_LONG).show();
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(downloadReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(downloadReceiver, filter);
+            }
+        } catch (Exception ignored) {
+            downloadReceiver = null;
+        }
     }
 
     /** Map the launch intent to a page of the site. */
@@ -234,6 +306,28 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public boolean supportsUpi() {
             return true;
+        }
+
+        /** Build number; matches the release tag app-v<number>. */
+        @JavascriptInterface
+        public int appVersion() {
+            return BuildConfig.VERSION_CODE;
+        }
+
+        /** Stable per-phone ID for this app (survives reinstalls with the same signing key). */
+        @JavascriptInterface
+        public String deviceId() {
+            try {
+                String id = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                return id == null ? "" : id;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public void installUpdate(String url) {
+            runOnUiThread(() -> startUpdate(url));
         }
 
         @JavascriptInterface
