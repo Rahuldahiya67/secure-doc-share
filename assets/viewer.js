@@ -1,5 +1,6 @@
 // Viewer: sign in, list documents shared with you, read one in a protected view.
 (async function () {
+  const { $$ } = window.App;
   const { sb, cfg, configured, inApp, $, esc, icon, brandHTML, timeAgo, renderSignIn, renderNotConfigured, renderHeader, getUser } = window.App;
   const root = $("#app");
 
@@ -43,14 +44,22 @@
   if (docId) await openDocument(docId, user);
   else if (viewName === "pay") await window.Payments.render(root, user);
   else if (viewName === "docs") await listDocuments(user);
-  else renderHome(user);
+  else if (viewName === "me") await myAccount(user);
+  else if (viewName === "help") await helpPage(user);
+  else if (viewName === "feedback") await feedbackPage(user);
+  else await renderHome(user);
 
   // ---------------------------------------------------------------
-  function renderHome(user) {
+  async function renderHome(user) {
     const first = (user.user_metadata?.full_name || user.user_metadata?.name || "").split(" ")[0];
+    const { data: anns } = await sb.from("announcements").select("*").order("pinned", { ascending: false }).order("created_at", { ascending: false }).limit(10);
+    const tile = (href, ic, t, sub) => `<a class="tile" href="${href}"><span class="tile-icon">${icon(ic)}</span>
+      <span class="tile-text"><span class="t">${t}</span><span class="s">${sub}</span></span></a>`;
     root.innerHTML = `
       <div class="home-head"><h1>${first ? `Hi ${esc(first)}` : "Welcome"}</h1>
         <p class="sub" style="margin:6px 0 0">What would you like to do?</p></div>
+      ${anns?.length ? `<section class="ann-list" aria-label="Announcements">${anns.map(a => `<div class="ann${a.pinned ? " pinned" : ""}">
+        <div class="t">${esc(a.title)}</div>${a.body ? `<p class="b">${linkify(a.body)}</p>` : ""}<div class="w">${esc(timeAgo(a.created_at))}</div></div>`).join("")}</section>` : ""}
       <div class="home-tiles">
         <a class="tile" href="?view=docs">
           <span class="tile-icon">${icon("docs")}</span>
@@ -62,7 +71,95 @@
           <span class="tile-text"><span class="t">Submit a payment</span>
           <span class="s">Send your earnings, payment and screenshots for review.</span></span>
         </a>
+        ${tile("?view=me", "user", "My account", "Your documents, reading time, payments and requests.")}
+        ${tile("?view=help", "help", "Help", "Answers to common questions.")}
+        ${tile("?view=feedback", "chat", "Send feedback", "Ideas, problems or questions for the owner.")}
       </div>`;
+  }
+
+  function linkify(text) {
+    return esc(text).replace(/https:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  }
+  // Declared as functions so they're ready before the page routes above run.
+  function backLinkHome() { return `<a href="./" class="back">${icon("back")} Home</a>`; }
+  function fmtSecs(n) { n = Math.round(n || 0); const h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60); return h ? `${h}h ${m}m` : `${m}m`; }
+  function rupees(n) { return `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`; }
+
+  // ---------------------------------------------------------------
+  async function myAccount(user) {
+    root.innerHTML = `${backLinkHome()}<div class="card"><p class="muted">Loading…</p></div>`;
+    const [docs, sess, pays, reqs] = await Promise.all([
+      sb.from("documents").select("id,title"),
+      sb.from("view_sessions").select("document_id,seconds,max_page,page_count,last_seen_at").order("last_seen_at", { ascending: false }).limit(500),
+      sb.from("payment_submissions").select("amount_earned,amount_sent,status,created_at").eq("user_id", user.id),
+      sb.from("access_requests").select("status,created_at").order("created_at", { ascending: false }).limit(1)
+    ]);
+    const S = sess.error ? [] : sess.data || [], D = docs.data || [], P = pays.error ? [] : pays.data || [];
+    const counted = P.filter(p => p.status !== "rejected");
+    const byDoc = new Map();
+    S.forEach(s => { const r = byDoc.get(s.document_id) || { secs: 0, max: 0, pages: 0, last: s.last_seen_at }; r.secs += s.seconds || 0; r.max = Math.max(r.max, s.max_page || 0); r.pages = Math.max(r.pages, s.page_count || 0); byDoc.set(s.document_id, r); });
+    const name = user.user_metadata?.full_name || user.user_metadata?.name || "";
+    const req = reqs.data?.[0];
+    root.innerHTML = `${backLinkHome()}
+      <div class="card">
+        <div class="row" style="gap:14px;flex-wrap:nowrap"><span class="avatar lg">${esc((name || user.email).split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase())}</span>
+          <div><h2 style="margin:0">${esc(name || "My account")}</h2><p class="sub" style="margin:2px 0 0">${esc(user.email)}</p></div></div>
+        <div class="stat-row">
+          <div><span>Documents</span><strong>${D.length}</strong></div>
+          <div><span>Reading time</span><strong>${fmtSecs(S.reduce((t, s) => t + (s.seconds || 0), 0))}</strong></div>
+          <div><span>Earned</span><strong>${rupees(counted.reduce((t, p) => t + Number(p.amount_earned), 0))}</strong></div>
+          <div><span>Paid</span><strong>${rupees(counted.reduce((t, p) => t + Number(p.amount_sent), 0))}</strong></div>
+        </div>
+        ${req?.status === "pending" ? `<div class="notice" style="margin-bottom:12px">Your access request from ${esc(timeAgo(req.created_at))} is waiting for review.</div>` : ""}
+        <h3 class="folder-head">Your documents</h3>
+        ${D.length ? `<ul class="doc-list">${D.map(d => { const r = byDoc.get(d.id); return `<li><a href="?doc=${encodeURIComponent(d.id)}">
+          <span class="doc-icon">${icon("file")}</span><span class="grow"><span class="t">${esc(d.title)}</span>
+          <span class="s">${r ? `${fmtSecs(r.secs)} read${r.pages ? `, reached page ${r.max} of ${r.pages}` : ""}` : "Not opened yet"}</span></span></a></li>`; }).join("")}</ul>`
+          : `<p class="muted small-text">Nothing shared with you yet. <a href="?view=docs">Request access</a></p>`}
+        <h3 class="folder-head">Payments</h3>
+        <p class="small-text" style="margin:0">${P.length ? `${P.length} ${P.length === 1 ? "submission" : "submissions"}, ${P.filter(p => p.status === "pending").length} waiting for review.` : "No payments yet."} <a href="?view=pay">Open payments</a></p>
+        <div class="row" style="margin-top:22px;gap:10px"><a class="btn" href="?view=help">Help</a><a class="btn" href="?view=feedback">Send feedback</a>
+          <span class="spacer"></span><button type="button" class="ghost" id="meOut">Sign out</button></div>
+      </div>`;
+    $("#meOut").onclick = () => window.App.signOut();
+  }
+
+  // ---------------------------------------------------------------
+  async function helpPage(user) {
+    const { data, error } = await sb.from("faqs").select("question,answer").order("sort_order").order("updated_at");
+    const list = error ? [] : data || [];
+    root.innerHTML = `${backLinkHome()}<div class="card faq"><h2>Help</h2><p class="sub">Answers to common questions.</p>
+      ${list.length ? list.map(f => `<details><summary>${esc(f.question)}</summary><p class="a">${linkify(f.answer)}</p></details>`).join("")
+        : `<div class="empty"><strong>No help articles yet</strong>Send a question and the owner will reply.</div>`}
+      <p style="margin:18px 0 0">Still stuck? <a href="?view=feedback">Send a question to the owner</a>.</p></div>`;
+  }
+
+  // ---------------------------------------------------------------
+  async function feedbackPage(user) {
+    const { data, error } = await sb.from("feedback").select("*").order("created_at", { ascending: false }).limit(30);
+    if (error) { root.innerHTML = `${backLinkHome()}<div class="card"><h2>Send feedback</h2><p class="muted">Feedback isn't switched on yet.</p></div>`; return; }
+    root.innerHTML = `${backLinkHome()}<div class="card"><h2>Send feedback</h2><p class="sub">Only the owner sees this. Replies show up below.</p>
+      <form id="fbForm">
+        <div class="seg" role="radiogroup" aria-label="Type">${[["idea", "Idea"], ["problem", "Problem"], ["question", "Question"], ["other", "Other"]].map(([k, l], i) =>
+          `<button type="button" data-kind="${k}" aria-selected="${i ? "false" : "true"}">${l}</button>`).join("")}</div>
+        <label for="fbMsg" style="margin-top:0">Message</label><textarea id="fbMsg" rows="5" required maxlength="2000" placeholder="What's on your mind?"></textarea>
+        <button class="primary full" type="submit" style="margin-top:12px">Send</button>
+        <p class="msg" id="fbStatus" role="status"></p>
+      </form>
+      ${data.length ? `<h3 class="folder-head">Your messages</h3><ul class="fb-list">${data.map(f => `<li class="fb" style="padding:12px 0">
+        <span class="muted small-text">${esc(timeAgo(f.created_at))}</span><p class="fb-msg">${esc(f.message)}</p>
+        ${f.admin_reply ? `<p class="fb-reply"><strong>Reply:</strong> ${linkify(f.admin_reply)}</p>` : `<span class="muted small-text">${f.status === "new" ? "Sent" : "Seen by the owner"}</span>`}</li>`).join("")}</ul>` : ""}
+    </div>`;
+    let kind = "idea";
+    $$("[data-kind]").forEach(b => b.onclick = () => { kind = b.dataset.kind; $$("[data-kind]").forEach(x => x.setAttribute("aria-selected", String(x === b))); });
+    $("#fbForm").onsubmit = async e => {
+      e.preventDefault();
+      const btn = $("#fbForm button[type=submit]"), st = $("#fbStatus");
+      btn.disabled = true;
+      const { error: iErr } = await sb.from("feedback").insert({ kind, message: $("#fbMsg").value.trim() });
+      if (iErr) { btn.disabled = false; st.className = "msg err"; st.textContent = /too_many/.test(iErr.message) ? "You've sent a lot today. Please try again tomorrow." : "Couldn't send. Please try again."; return; }
+      feedbackPage(user); window.App.toast?.("Sent. Thank you!");
+    };
   }
 
   // ---------------------------------------------------------------

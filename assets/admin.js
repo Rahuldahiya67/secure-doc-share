@@ -32,7 +32,7 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback] = await Promise.all([
       sb.from("documents")
         .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -48,7 +48,10 @@
       sb.from("people").select("*"),
       sb.from("groups").select("id,name,description,created_at,group_members(email,added_at),group_documents(document_id)").order("name"),
       sb.from("access_requests").select("*").order("created_at", { ascending: false }).limit(500),
-      sb.from("document_views").select("*")
+      sb.from("document_views").select("*"),
+      sb.from("announcements").select("*").order("pinned", { ascending: false }).order("created_at", { ascending: false }),
+      sb.from("faqs").select("*").order("sort_order").order("updated_at"),
+      sb.from("feedback").select("*").order("created_at", { ascending: false }).limit(500)
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -67,6 +70,8 @@
     S.requests = requests.error ? [] : requests.data || [];
     S.docsV3 = !docViews.error;
     S.docViews = docViews.error ? [] : docViews.data || [];
+    S.portalV1 = !anns.error && !faqs.error && !feedback.error;
+    S.announcements = anns.data || []; S.faqs = faqs.data || []; S.feedback = feedback.data || [];
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
     if (S.accounts.some(x => x.qr_path)) {
@@ -101,6 +106,7 @@
     S.peopleRows.forEach(p => person(p.email));
     S.groups.forEach(g => g.group_members.forEach(m => person(m.email)));
     S.requests.forEach(r => person(r.email));
+    S.feedback.forEach(f => person(f.email));
   }
   function person(email) {
     if (!D.people.has(email)) D.people.set(email, { docs: new Set(), opened: new Set() });
@@ -171,6 +177,7 @@
     ["people", "People", "people"],
     ["activity", "Activity", "activity"],
     ["payments", "Payments", "wallet"],
+    ["messages", "Messages", "chat"],
     ["blocked", "Blocked", "block"]
   ];
 
@@ -192,8 +199,8 @@
   const view = $("#view");
 
   function route(silent) {
-    const [name, arg] = decodeURIComponent(location.hash.slice(1) || "overview").split("/");
-    const section = { doc: "documents", person: "people", group: "people", payment: "payments" }[name] || name;
+    const [name, arg, arg2] = decodeURIComponent(location.hash.slice(1) || "overview").split("/");
+    const section = { doc: "documents", person: "people", group: "people", statement: "people", payment: "payments" }[name] || name;
     $$("[data-nav]").forEach(a => { if (a.dataset.nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
     $('[data-count="documents"]').textContent = S.docs.length || "";
     const pendReq = S.requests.filter(r => r.status === "pending").length;
@@ -201,9 +208,11 @@
     $('[data-count="blocked"]').textContent = S.blocked.length || "";
     const pendingPays = S.payments.filter(p => p.status === "pending").length;
     $('[data-count="payments"]').textContent = pendingPays ? `${pendingPays} new` : "";
+    const newFb = S.feedback.filter(f => f.status === "new").length;
+    $('[data-count="messages"]').textContent = newFb ? `${newFb} new` : "";
 
-    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, activity, blocked, payments, payment: paymentDetail };
-    (pages[name] || overview)(arg);
+    const pages = { overview, documents, doc: docDetail, people, person: personDetail, group: groupDetail, statement, messages, activity, blocked, payments, payment: paymentDetail };
+    (pages[name] || overview)(arg, arg2);
     if (!silent) { window.scrollTo(0, 0); }
   }
 
@@ -652,6 +661,7 @@
     view.innerHTML = `
       ${head(r.name || email, `${blocked ? `<span class="tag off">Blocked</span>&nbsp; ` : ""}${esc(email)}${r.outlierId ? `, Outlier ID ${esc(r.outlierId)}` : ""}`,
         `${blocked ? `<button type="button" data-act="unblock">Unblock</button>` : `<button type="button" class="danger" data-act="block">Block</button>`}
+         ${r.pays.length ? `<a class="btn" href="#statement/${encodeURIComponent(email)}">Monthly statement</a>` : ""}
          ${directDocs.size ? `<button type="button" data-act="removeAll">Remove from all documents</button>` : ""}`,
         backLink("#people", "People"))}
       <div class="kpis">
@@ -958,6 +968,196 @@
   }
 
   // ---------------------------------------------------------------
+  // Messages: announcements, Help/FAQ, feedback inbox
+  // ---------------------------------------------------------------
+  const MSG_TABS = [["", "Announcements"], ["faq", "Help & FAQ"], ["feedback", "Feedback"]];
+  const msgTabs = active => {
+    const fresh = S.feedback.filter(f => f.status === "new").length;
+    return `<nav class="tabs" aria-label="Messages">${MSG_TABS.map(([k, l]) =>
+      `<a href="#messages${k ? "/" + k : ""}" ${k === active ? 'aria-current="page"' : ""}>${l}${k === "feedback" && fresh ? ` (${fresh})` : ""}</a>`).join("")}</nav>`;
+  };
+  function messages(tab = "") {
+    if (!S.portalV1) {
+      view.innerHTML = `${head("Messages", "Announcements, help pages and feedback for your people.")}
+        <div class="notice">Run <code>supabase/008_portal.sql</code> in the Supabase SQL Editor to switch this on.</div>`;
+      return;
+    }
+    ({ "": announcementsPage, faq: faqPage, feedback: feedbackPage }[tab] || announcementsPage)();
+  }
+
+  function announcementsPage() {
+    const now = new Date();
+    const state = a => !a.is_active ? ["off", "Hidden"] : a.expires_at && new Date(a.expires_at) < now ? ["warn", "Ended"] : ["live", a.pinned ? "Pinned" : "Showing"];
+    view.innerHTML = `
+      ${head("Messages", "Shown at the top of everyone's home screen in the app.", `<button class="primary" type="button" data-act="newAnn">${icon("megaphone")}New announcement</button>`)}
+      ${msgTabs("")}
+      <div class="panel">${S.announcements.length ? `<div class="table-wrap"><table class="data"><tbody>${S.announcements.map(a => { const [c, t] = state(a); return `<tr>
+        <td><div class="cell-title">${esc(a.title)}</div>${a.body ? `<div class="cell-sub clamp">${esc(a.body)}</div>` : ""}
+          <div class="cell-sub">${esc(timeAgo(a.created_at))} by ${esc(a.created_by)}${a.expires_at ? `, until ${esc(fmtDate(a.expires_at))}` : ""}</div></td>
+        <td><span class="tag ${c}">${t}</span></td>
+        <td class="num"><div class="row end"><button class="small" type="button" data-edit-ann="${a.id}">Edit</button><button class="small ghost" type="button" data-del-ann="${a.id}">Delete</button></div></td></tr>`; }).join("")}</tbody></table></div>`
+        : emptyState("No announcements yet", "Post news, deadlines or reminders. Everyone sees them when they open the app.")}</div>`;
+    $('[data-act="newAnn"]').onclick = () => annDialog(null);
+    $$("[data-edit-ann]", view).forEach(b => b.onclick = () => annDialog(S.announcements.find(a => a.id === b.dataset.editAnn)));
+    $$("[data-del-ann]", view).forEach(b => b.onclick = () => confirmDialog({ title: "Delete this announcement?", text: "It disappears from everyone's home screen.", confirm: "Delete", danger: true,
+      run: async () => { const { error } = await sb.from("announcements").delete().eq("id", b.dataset.delAnn); if (error) throw error; toast("Announcement deleted"); await refresh(); } }));
+  }
+  function annDialog(a) {
+    openDialog(`
+      <div class="dlg-head"><h2>${a ? "Edit announcement" : "New announcement"}</h2></div>
+      <div class="dlg-body">
+        <label for="anTitle">Title</label><input id="anTitle" type="text" required maxlength="120" value="${esc(a?.title || "")}" placeholder="e.g. New assessment batch starts Monday">
+        <label for="anBody">Message (optional)</label><textarea id="anBody" rows="5" maxlength="2000">${esc(a?.body || "")}</textarea>
+        <label for="anExp">Show until (optional)</label><input id="anExp" type="datetime-local" value="${toLocalInput(a?.expires_at)}">
+        <label class="row" style="gap:8px;font-weight:400"><input type="checkbox" id="anPin" style="width:auto;margin:0" ${a?.pinned ? "checked" : ""}> Pin to the top</label>
+        <label class="row" style="gap:8px;font-weight:400;margin-top:8px"><input type="checkbox" id="anOn" style="width:auto;margin:0" ${a ? (a.is_active ? "checked" : "") : "checked"}> Showing</label>
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">${a ? "Save" : "Post"}</button></div>`,
+      async () => {
+        const exp = $("#anExp").value;
+        const row = { title: $("#anTitle").value.trim(), body: $("#anBody").value.trim() || null, pinned: $("#anPin").checked, is_active: $("#anOn").checked, expires_at: exp ? new Date(exp).toISOString() : null };
+        const { error } = a ? await sb.from("announcements").update(row).eq("id", a.id) : await sb.from("announcements").insert(row);
+        if (error) throw error;
+        dlg.close(); toast(a ? "Saved" : "Posted"); await refresh();
+      });
+  }
+
+  function faqPage() {
+    view.innerHTML = `
+      ${head("Messages", "Questions and answers people see on the Help page in the app.", `<button class="primary" type="button" data-act="newFaq">Add a question</button>`)}
+      ${msgTabs("faq")}
+      <div class="panel">${S.faqs.length ? `<div class="table-wrap"><table class="data"><tbody>${S.faqs.map((f, i) => `<tr>
+        <td><div class="cell-title">${esc(f.question)}</div><div class="cell-sub clamp">${esc(f.answer)}</div></td>
+        <td>${f.is_active ? `<span class="tag live">Showing</span>` : `<span class="tag off">Hidden</span>`}</td>
+        <td class="num"><div class="row end">
+          <button class="small ghost" type="button" data-move="${i}" data-dir="-1" ${i ? "" : "disabled"} aria-label="Move up">↑</button>
+          <button class="small ghost" type="button" data-move="${i}" data-dir="1" ${i < S.faqs.length - 1 ? "" : "disabled"} aria-label="Move down">↓</button>
+          <button class="small" type="button" data-edit-faq="${f.id}">Edit</button><button class="small ghost" type="button" data-del-faq="${f.id}">Delete</button></div></td></tr>`).join("")}</tbody></table></div>`
+        : emptyState("No questions yet", "Add answers to what people ask you most: how to install the app, how to pay, who to contact.")}</div>`;
+    $('[data-act="newFaq"]').onclick = () => faqDialog(null);
+    $$("[data-edit-faq]", view).forEach(b => b.onclick = () => faqDialog(S.faqs.find(f => f.id === b.dataset.editFaq)));
+    $$("[data-del-faq]", view).forEach(b => b.onclick = () => confirmDialog({ title: "Delete this question?", text: "It's removed from the Help page.", confirm: "Delete", danger: true,
+      run: async () => { const { error } = await sb.from("faqs").delete().eq("id", b.dataset.delFaq); if (error) throw error; toast("Deleted"); await refresh(); } }));
+    $$("[data-move]", view).forEach(b => b.onclick = async () => {
+      const list = S.faqs.slice(), i = Number(b.dataset.move), j = i + Number(b.dataset.dir);
+      [list[i], list[j]] = [list[j], list[i]];
+      const res = await Promise.all(list.map((f, k) => f.sort_order === k ? null : sb.from("faqs").update({ sort_order: k }).eq("id", f.id)).filter(Boolean));
+      const err = res.find(r => r.error); if (err) return toast(err.error.message);
+      await refresh();
+    });
+  }
+  function faqDialog(f) {
+    openDialog(`
+      <div class="dlg-head"><h2>${f ? "Edit question" : "Add a question"}</h2></div>
+      <div class="dlg-body">
+        <label for="fqQ">Question</label><input id="fqQ" type="text" required maxlength="300" value="${esc(f?.question || "")}" placeholder="e.g. How do I install the app?">
+        <label for="fqA">Answer</label><textarea id="fqA" rows="7" required maxlength="4000">${esc(f?.answer || "")}</textarea>
+        <p class="hint">Plain text. Line breaks are kept, and links starting with https:// become tappable.</p>
+        <label class="row" style="gap:8px;font-weight:400"><input type="checkbox" id="fqOn" style="width:auto;margin:0" ${f ? (f.is_active ? "checked" : "") : "checked"}> Showing</label>
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Save</button></div>`,
+      async () => {
+        const row = { question: $("#fqQ").value.trim(), answer: $("#fqA").value.trim(), is_active: $("#fqOn").checked, updated_at: new Date().toISOString() };
+        const { error } = f ? await sb.from("faqs").update(row).eq("id", f.id) : await sb.from("faqs").insert({ ...row, sort_order: S.faqs.length });
+        if (error) throw error;
+        dlg.close(); toast("Saved"); await refresh();
+      });
+  }
+
+  const FB_KIND = { idea: "Idea", problem: "Problem", question: "Question", other: "Other" };
+  function feedbackPage() {
+    const order = { new: 0, seen: 1, done: 2 };
+    const list = S.feedback.slice().sort((a, b) => order[a.status] - order[b.status] || new Date(b.created_at) - new Date(a.created_at));
+    view.innerHTML = `
+      ${head("Messages", "What people sent from the Feedback button in the app.")}
+      ${msgTabs("feedback")}
+      <div class="panel">${list.length ? `<ul class="fb-list">${list.map(f => `<li class="fb ${f.status}">
+        <div class="row" style="justify-content:space-between;gap:8px">
+          <div><a class="cell-title" href="#person/${encodeURIComponent(f.email)}">${esc(nameOf(f.email))}</a>
+            <span class="muted small-text">${esc(FB_KIND[f.kind] || f.kind)}, ${esc(timeAgo(f.created_at))}</span></div>
+          <span class="tag ${f.status === "new" ? "warn" : f.status === "done" ? "live" : "plain"}">${f.status === "new" ? "New" : f.status === "done" ? "Done" : "Seen"}</span></div>
+        <p class="fb-msg">${esc(f.message)}</p>
+        ${f.admin_reply ? `<p class="fb-reply"><strong>Your reply</strong> (${esc(f.replied_by || "")}): ${esc(f.admin_reply)}</p>` : ""}
+        <div class="row">
+          <button class="small primary" type="button" data-reply="${f.id}">${f.admin_reply ? "Edit reply" : "Reply"}</button>
+          ${f.status !== "done" ? `<button class="small" type="button" data-fbs="${f.id}" data-to="done">Mark done</button>` : `<button class="small" type="button" data-fbs="${f.id}" data-to="seen">Reopen</button>`}
+          ${f.status === "new" ? `<button class="small ghost" type="button" data-fbs="${f.id}" data-to="seen">Mark seen</button>` : ""}
+          <span class="spacer"></span><button class="small ghost" type="button" data-fbdel="${f.id}">Delete</button></div></li>`).join("")}</ul>`
+        : emptyState("No feedback yet", "When someone taps Send feedback in the app, it lands here.")}</div>`;
+    $$("[data-fbs]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("feedback").update({ status: b.dataset.to }).eq("id", b.dataset.fbs);
+      if (error) return toast(error.message); await refresh();
+    });
+    $$("[data-fbdel]", view).forEach(b => b.onclick = () => confirmDialog({ title: "Delete this message?", text: "It's removed for good.", confirm: "Delete", danger: true,
+      run: async () => { const { error } = await sb.from("feedback").delete().eq("id", b.dataset.fbdel); if (error) throw error; toast("Deleted"); await refresh(); } }));
+    $$("[data-reply]", view).forEach(b => b.onclick = () => {
+      const f = S.feedback.find(x => x.id === b.dataset.reply);
+      openDialog(`
+        <div class="dlg-head"><h2>Reply to ${esc(nameOf(f.email))}</h2><p class="sub" style="margin:6px 0 0">They see your reply in the app under Send feedback.</p></div>
+        <div class="dlg-body"><blockquote class="fb-quote">${esc(f.message)}</blockquote>
+          <label for="fbR">Reply</label><textarea id="fbR" rows="5" required maxlength="2000">${esc(f.admin_reply || "")}</textarea>
+          <div class="msg dlg-msg" role="status"></div></div>
+        <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Send reply</button></div>`,
+        async () => {
+          const { error } = await sb.from("feedback").update({ admin_reply: $("#fbR").value.trim(), replied_by: user.email, replied_at: new Date().toISOString(), status: "done" }).eq("id", f.id);
+          if (error) throw error;
+          dlg.close(); toast("Reply saved"); await refresh();
+        });
+    });
+    // Opening the inbox marks new items as seen.
+    const fresh = S.feedback.filter(f => f.status === "new").map(f => f.id);
+    if (fresh.length) setTimeout(async () => {
+      await sb.from("feedback").update({ status: "seen" }).in("id", fresh);
+      S.feedback.forEach(f => { if (fresh.includes(f.id)) f.status = "seen"; });
+      const c = $('[data-count="messages"]'); if (c) c.textContent = "";
+    }, 4000);
+  }
+
+  // ---------------------------------------------------------------
+  // Monthly statement for one person (print or save as PDF)
+  // ---------------------------------------------------------------
+  function statement(emailArg, monthArg) {
+    const email = decodeURIComponent(emailArg || "");
+    const r = personSummary(email);
+    const monthKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const months = [...new Set(r.pays.map(p => monthKey(payDay(p))))].sort().reverse();
+    const month = monthArg || months[0] || monthKey(new Date());
+    const [y, m] = month.split("-").map(Number);
+    const label = new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const rows = r.pays.filter(p => monthKey(payDay(p)) === month).sort((a, b) => payDay(a) - payDay(b));
+    const counted = rows.filter(p => p.status !== "rejected");
+    const earned = sum(counted, p => Number(p.amount_earned)), paid = sum(counted, p => Number(p.amount_sent));
+    const verified = sum(rows.filter(p => p.status === "verified"), p => Number(p.amount_sent));
+    const expected = S.expectedPercent ? earned * S.expectedPercent / 100 : null;
+    view.innerHTML = `
+      <div class="no-print">${head("Monthly statement", esc(r.name || email), `<button class="primary" type="button" data-act="print">Print or save as PDF</button>`, backLink(`#person/${encodeURIComponent(email)}`, r.name || email))}
+        <div class="row" style="margin-bottom:16px"><label for="stMonth" style="margin:0">Month</label>
+          <select id="stMonth" style="width:auto">${[...new Set([month, ...months])].sort().reverse().map(k => { const [yy, mm] = k.split("-").map(Number);
+            return `<option value="${k}" ${k === month ? "selected" : ""}>${new Date(yy, mm - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</option>`; }).join("")}</select></div></div>
+      <article class="statement">
+        <header class="st-head"><div>${brandHTML()}<p class="muted small-text" style="margin:6px 0 0">Statement for ${esc(label)}</p></div>
+          <div class="st-to"><strong>${esc(r.name || email)}</strong><br>${esc(email)}${r.outlierId ? `<br>Outlier ID ${esc(r.outlierId)}` : ""}</div></header>
+        <div class="st-totals">
+          <div><span>Earned</span><strong>${inr(earned)}</strong></div>
+          <div><span>Paid</span><strong>${inr(paid)}</strong></div>
+          <div><span>Share paid</span><strong>${pctTxt(earned ? (paid / earned) * 100 : null)}</strong></div>
+          ${expected != null ? `<div><span>Expected at ${S.expectedPercent}%</span><strong>${inr(expected)}</strong></div>` : ""}
+        </div>
+        ${rows.length ? `<table class="data st-table"><thead><tr><th>Payout date</th><th>UTR</th><th class="num">Earned</th><th class="num">Paid</th><th class="num">Share</th><th>Status</th></tr></thead>
+          <tbody>${rows.map(p => `<tr><td>${esc(payDay(p).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }))}</td><td>${esc(p.utr || "–")}</td>
+            <td class="num">${inr(p.amount_earned)}</td><td class="num">${inr(p.amount_sent)}</td><td class="num">${pctTxt(Number(p.amount_earned) ? (p.amount_sent / p.amount_earned) * 100 : null)}</td>
+            <td>${(PAY_STATUS[p.status] || PAY_STATUS.pending)[1]}</td></tr>`).join("")}</tbody>
+          <tfoot><tr><th colspan="2">Total (excluding rejected)</th><th class="num">${inr(earned)}</th><th class="num">${inr(paid)}</th><th class="num">${pctTxt(earned ? (paid / earned) * 100 : null)}</th><th></th></tr></tfoot></table>`
+          : `<p class="muted">No payments with a payout date in ${esc(label)}.</p>`}
+        <p class="muted small-text st-foot">Verified so far: ${inr(verified)}. ${expected != null && paid < expected ? `Short by ${inr(expected - paid)} against the expected ${S.expectedPercent}%.` : ""} Generated ${esc(new Date().toLocaleString())}.</p>
+      </article>`;
+    $("#stMonth").onchange = e => { location.hash = `statement/${encodeURIComponent(email)}/${e.target.value}`; };
+    $('[data-act="print"]').onclick = () => window.print();
+  }
+
+  // ---------------------------------------------------------------
   // Activity
   // ---------------------------------------------------------------
   function activity() {
@@ -1057,14 +1257,14 @@
   const payTabs = active => `<nav class="tabs" aria-label="Payments">${PAY_TABS.map(([k, l]) =>
     `<a href="#payments${k ? "/" + k : ""}" ${k === active ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>`;
 
-  function payments(tab = "") {
+  function payments(tab = "", sub = "") {
     if (S.paymentsMissing) {
       view.innerHTML = `${head("Payments", "Payment submissions from your people.")}
         <div class="notice">Payments aren't switched on yet. Run <code>supabase/004_payments.sql</code> and then <code>supabase/005_payments_v2.sql</code> in the Supabase SQL Editor.</div>`;
       return;
     }
     const pages = { "": paySubmissions, dashboard: payDashboard, missing: payMissing, settings: paySettings, log: payLog };
-    (pages[tab] || paySubmissions)();
+    (pages[tab] || paySubmissions)(sub);
   }
 
   function v2Note() {
@@ -1123,7 +1323,8 @@
     draw();
   }
 
-  function payDashboard() {
+  function payDashboard(mode = "") {
+    const monthly = mode === "monthly";
     const live = S.payments.filter(p => p.status !== "rejected");
     const verified = S.payments.filter(p => p.status === "verified");
     const pending = S.payments.filter(p => p.status === "pending");
@@ -1134,6 +1335,11 @@
     const thisWeek = weekStart(new Date());
     for (let i = 11; i >= 0; i--) { const d = new Date(thisWeek); d.setDate(d.getDate() - i * 7); weeks.push({ key: d.toISOString().slice(0, 10), d, v: 0 }); }
     live.forEach(p => { const w = weeks.find(x => x.key === weekKey(payDay(p))); if (w) w.v += Number(p.amount_sent); });
+    const months = [];
+    for (let i = 11; i >= 0; i--) { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); months.push({ key: d.toISOString().slice(0, 7), d, v: 0, e: 0 }); }
+    const monthKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    months.forEach(m => { m.key = monthKey(m.d); });
+    live.forEach(p => { const m = months.find(x => x.key === monthKey(payDay(p))); if (m) { m.v += Number(p.amount_sent); m.e += Number(p.amount_earned); } });
 
     const byPerson = new Map();
     live.forEach(p => { const r = byPerson.get(p.email) || { name: p.name, earned: 0, paid: 0, n: 0 }; r.earned += Number(p.amount_earned); r.paid += Number(p.amount_sent); r.n++; byPerson.set(p.email, r); });
@@ -1156,8 +1362,12 @@
         ${kpi("People paying", byPerson.size, `${inr(sum([...byPerson.values()], r => r.earned))} earned in total`)}
       </div>
       <div class="panel" style="margin-bottom:16px">
-        <div class="panel-head"><h2>Paid per week</h2><span class="muted small-text">Last 12 weeks, by payout date, pending and verified</span></div>
-        <div class="panel-body"><div id="weekChart"></div></div>
+        <div class="panel-head"><h2>Paid per ${monthly ? "month" : "week"}</h2>
+          <div class="row"><span class="muted small-text hide-sm">Last 12 ${monthly ? "months" : "weeks"}, by payout date, pending and verified</span>
+          <div class="seg" role="group" aria-label="Chart period"><a href="#payments/dashboard" ${monthly ? "" : 'aria-current="true"'}>Weekly</a><a href="#payments/dashboard/monthly" ${monthly ? 'aria-current="true"' : ""}>Monthly</a></div></div></div>
+        <div class="panel-body"><div id="weekChart"></div>
+          ${monthly ? `<details class="table-view"><summary>Show as a table</summary><div class="table-wrap"><table class="data"><thead><tr><th>Month</th><th class="num">Earned</th><th class="num">Paid</th><th class="num">Share</th></tr></thead>
+          <tbody>${months.slice().reverse().map(m => `<tr><td>${esc(m.d.toLocaleDateString(undefined, { month: "long", year: "numeric" }))}</td><td class="num">${inr(m.e)}</td><td class="num">${inr(m.v)}</td><td class="num">${pctTxt(m.e ? (m.v / m.e) * 100 : null)}</td></tr>`).join("")}</tbody></table></div></details>` : ""}</div>
       </div>
       <div class="grid-2">
         <div class="panel"><div class="panel-head"><h2>Top earners</h2><span class="muted small-text">Earned, and paid</span></div>
@@ -1170,7 +1380,11 @@
             <span class="v">${inr(r.earned)}<span class="cell-sub" style="text-align:right">team earnings</span></span></li>`).join("")}</ul>`
             : emptyState("No referrals yet", "Shows once people fill in who referred them.")}</div>
       </div>`;
-    barChart($("#weekChart"), weeks.map(w => ({ label: w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), value: w.v, tip: `Week of ${w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}: ${inr(w.v)}` })),
+    const series = monthly
+      ? months.map(m => ({ label: m.d.toLocaleDateString(undefined, { month: "short" }), value: m.v, tip: `${m.d.toLocaleDateString(undefined, { month: "long", year: "numeric" })}: ${inr(m.v)} paid of ${inr(m.e)} earned` }))
+      : null;
+    if (series) barChart($("#weekChart"), series, { fmt: v => v === 0 ? "0" : v >= 1000 ? `₹${Math.round(v / 100) / 10}k` : `₹${Math.round(v)}`, height: 200 });
+    else barChart($("#weekChart"), weeks.map(w => ({ label: w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), value: w.v, tip: `Week of ${w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}: ${inr(w.v)}` })),
       { fmt: v => v === 0 ? "0" : v >= 1000 ? `₹${Math.round(v / 100) / 10}k` : `₹${Math.round(v)}`, height: 200 });
   }
 
