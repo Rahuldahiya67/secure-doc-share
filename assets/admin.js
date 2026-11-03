@@ -32,9 +32,9 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews] = await Promise.all([
       sb.from("documents")
-        .select("id,title,storage_path,is_active,expires_at,created_at,document_access(email,added_at)")
+        .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
       sb.from("view_sessions")
         .select("id,document_id,email,device_id,device_label,page_count,max_page,seconds,page_seconds,started_at,last_seen_at")
@@ -47,7 +47,8 @@
       sb.rpc("is_owner"),
       sb.from("people").select("*"),
       sb.from("groups").select("id,name,description,created_at,group_members(email,added_at),group_documents(document_id)").order("name"),
-      sb.from("access_requests").select("*").order("created_at", { ascending: false }).limit(500)
+      sb.from("access_requests").select("*").order("created_at", { ascending: false }).limit(500),
+      sb.from("document_views").select("*")
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -64,6 +65,8 @@
     S.peopleRows = peopleRows.error ? [] : peopleRows.data || [];
     S.groups = groups.error ? [] : groups.data || [];
     S.requests = requests.error ? [] : requests.data || [];
+    S.docsV3 = !docViews.error;
+    S.docViews = docViews.error ? [] : docViews.data || [];
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
     if (S.accounts.some(x => x.qr_path)) {
@@ -113,6 +116,7 @@
   const docTitle = id => D.doc.get(id)?.title || "Deleted document";
   function docStatus(d) {
     if (!d.is_active) return { cls: "off", text: "Link off" };
+    if (d.available_from && new Date(d.available_from) > new Date()) return { cls: "warn", text: `Opens in ${timeLeft(d.available_from)}` };
     if (d.expires_at && new Date(d.expires_at) < new Date()) return { cls: "warn", text: "Expired" };
     if (d.expires_at) return { cls: "live", text: `Closes in ${timeLeft(d.expires_at)}` };
     return { cls: "live", text: "Sharing" };
@@ -129,6 +133,24 @@
     [48, "2 days"], [72, "3 days"], [168, "7 days"], [720, "30 days"]];
   const expirySelect = (id, selected = 1) =>
     `<select id="${id}" style="width:auto;min-width:130px">${EXPIRY_OPTIONS.map(([h, l]) => `<option value="${h}"${h === selected ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+  const toLocalInput = iso => iso ? new Date(new Date(iso).getTime() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16) : "";
+  const folderList = () => [...new Set(S.docs.map(d => d.folder).filter(Boolean))].sort();
+  const folderDatalist = () => `<datalist id="folderList">${folderList().map(f => `<option value="${esc(f)}">`).join("")}</datalist>`;
+  // Extra document settings (folder, opens at, one view) for the upload and edit dialogs.
+  function docOptionsHTML(d = {}) {
+    if (!S.docsV3) return `<p class="hint">Run supabase/007_documents.sql to add folders, an opening time and one-time view.</p>`;
+    return `
+      <div class="form-grid">
+        <div><label for="xFolder">Folder (optional)</label><input id="xFolder" type="text" maxlength="60" list="folderList" placeholder="e.g. Guides" value="${esc(d.folder || "")}">${folderDatalist()}</div>
+        <div><label for="xFrom">Opens at (optional)</label><input id="xFrom" type="datetime-local" value="${toLocalInput(d.available_from)}"></div>
+      </div>
+      <label class="row" style="gap:8px;font-weight:400;margin-top:14px"><input type="checkbox" id="xOnce" style="width:auto;margin:0" ${d.one_time ? "checked" : ""}> One view only: each person can open it once</label>`;
+  }
+  function docOptionsValue() {
+    if (!S.docsV3) return {};
+    const from = $("#xFrom").value;
+    return { folder: $("#xFolder").value.trim() || null, available_from: from ? new Date(from).toISOString() : null, one_time: $("#xOnce").checked };
+  }
   function shareLink(id) {
     const u = new URL("./", location.href);
     u.searchParams.set("doc", id);
@@ -295,12 +317,14 @@
     view.innerHTML = `
       ${head("Documents", "Every PDF you've shared, with who has opened it.", shareBtn)}
       <div class="panel">
-        <div class="panel-head"><input type="search" id="q" placeholder="Search documents" style="max-width:320px" aria-label="Search documents"></div>
+        <div class="panel-head"><div class="row" style="flex:1"><input type="search" id="q" placeholder="Search documents" style="max-width:320px" aria-label="Search documents">
+          ${folderList().length ? `<select id="fFolder" style="width:auto" aria-label="Folder"><option value="">All folders</option>${folderList().map(f => `<option>${esc(f)}</option>`).join("")}<option value="__none">No folder</option></select>` : ""}</div></div>
         <div id="docTable"></div>
       </div>`;
     const draw = () => {
       const q = $("#q").value.trim().toLowerCase();
-      const list = S.docs.filter(d => d.title.toLowerCase().includes(q));
+      const ff = $("#fFolder")?.value || "";
+      const list = S.docs.filter(d => d.title.toLowerCase().includes(q) && (!ff || (ff === "__none" ? !d.folder : d.folder === ff)));
       $("#docTable").innerHTML = list.length ? `<div class="table-wrap"><table class="data">
         <thead><tr><th>Document</th><th>Status</th><th class="num">Opened by</th><th class="num">Reading time</th><th class="hide-sm">Last opened</th></tr></thead>
         <tbody>${list.map(d => {
@@ -308,7 +332,7 @@
           const st = docStatus(d);
           const live = ss.some(isLive);
           return `<tr class="clickable" tabindex="0" data-href="doc/${d.id}">
-            <td><div class="cell-title">${esc(d.title)}</div><div class="cell-sub">Shared ${esc(timeAgo(d.created_at))}${d.expires_at ? `, expires ${esc(fmtDate(d.expires_at))}` : ""}</div></td>
+            <td><div class="cell-title">${esc(d.title)}</div><div class="cell-sub">${d.folder ? `${esc(d.folder)} · ` : ""}Shared ${esc(timeAgo(d.created_at))}${d.expires_at ? `, expires ${esc(fmtDate(d.expires_at))}` : ""}${d.one_time ? " · One view only" : ""}</div></td>
             <td>${live ? `<span class="tag now">Being read</span>` : `<span class="tag ${st.cls}">${st.text}</span>`}</td>
             <td class="num">${new Set(ss.map(s => s.email).filter(e => D.access.get(d.id).has(e))).size} of ${D.access.get(d.id).size}</td>
             <td class="num">${fmtDuration(sum(ss, s => s.seconds))}</td>
@@ -318,6 +342,7 @@
       wireCommon();
     };
     $("#q").oninput = draw;
+    if ($("#fFolder")) $("#fFolder").onchange = draw;
     draw();
     wireCommon();
   }
@@ -349,9 +374,12 @@
         furthest: Math.max(0, ...mine.map(s => s.max_page || 0)), last: mine[0]?.last_seen_at, live: mine.some(isLive)
       };
     }).sort((a, b) => (b.live - a.live) || (b.secs - a.secs) || a.email.localeCompare(b.email));
+    // Allowed people who haven't opened it or haven't reached the last page.
+    const behind = rows.filter(r => r.allowed && !D.blocked.has(r.email) && (!r.mine.length || (pageCount && r.furthest < pageCount)));
+    const viewsOf = email => S.docViews.find(v => v.document_id === d.id && v.email === email);
 
     view.innerHTML = `
-      ${head(d.title, `<span class="tag ${st.cls}">${st.text}</span>&nbsp; Shared ${esc(fmtDate(d.created_at))}${d.expires_at ? `, expires ${esc(fmtDate(d.expires_at))}` : ", no expiry"}`,
+      ${head(d.title, `<span class="tag ${st.cls}">${st.text}</span>&nbsp; ${d.folder ? `${esc(d.folder)} · ` : ""}Shared ${esc(fmtDate(d.created_at))}${d.available_from ? `, opens ${esc(fmtDate(d.available_from))}` : ""}${d.expires_at ? `, closes ${esc(fmtDate(d.expires_at))}` : ", no expiry"}${d.one_time ? " · One view only" : ""}`,
         `<button type="button" data-act="edit">Edit</button>
          <button type="button" data-act="replace">Replace PDF</button>
          <button type="button" data-act="toggle">${d.is_active ? "Turn link off" : "Turn link on"}</button>
@@ -382,13 +410,15 @@
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>People</h2><div class="row"><span class="muted small-text">${allowed.length} allowed</span>
+            ${behind.length ? `<button class="small" type="button" data-act="remind">Remind ${behind.length}</button>` : ""}
             ${direct.length ? `<button class="small danger" type="button" data-act="revokeDoc">Remove everyone</button>` : ""}</div></div>
           ${rows.length ? `<div class="table-wrap"><table class="data">
             <thead><tr><th>Email</th><th>Status</th><th class="num">Time</th><th class="num hide-sm">Furthest page</th><th></th></tr></thead>
             <tbody>${rows.map(r => `<tr>
               <td><a href="#person/${encodeURIComponent(r.email)}" class="cell-title">${esc(r.email)}</a>
                 <div class="cell-sub">${r.last ? `Last opened ${esc(timeAgo(r.last))}` : "Not opened yet"}${r.via.length && !r.direct ? `, via ${esc(r.via.join(", "))}` : ""}</div></td>
-              <td>${personTag(r.email, r)}</td>
+              <td>${personTag(r.email, r)}${d.one_time && r.allowed ? (() => { const v = viewsOf(r.email); const used = v?.used || 0, allowedN = v?.allowed ?? 1;
+                return `<div class="cell-sub">${used} of ${allowedN} ${allowedN === 1 ? "view" : "views"} used${used >= allowedN ? ` <button class="small ghost" type="button" data-moreview="${esc(r.email)}">Give another view</button>` : ""}</div>`; })() : ""}</td>
               <td class="num">${r.secs ? fmtDuration(r.secs) : "–"}</td>
               <td class="num hide-sm">${r.furthest ? `${r.furthest} of ${pageCount}` : "–"}</td>
               <td class="num">${r.direct ? `<button class="small ghost" data-remove="${esc(r.email)}" type="button">Remove</button>` : r.via.length ? `<span class="muted small-text">Group</span>` : ""}</td></tr>`).join("")}
@@ -469,6 +499,13 @@
       toast(`Added ${fresh.length} ${fresh.length === 1 ? "person" : "people"}`);
       await refresh();
     };
+    if (act("remind")) act("remind").onclick = () => remindDialog(d, behind, pageCount);
+    $$("[data-moreview]", view).forEach(b => b.onclick = async () => {
+      const email = b.dataset.moreview, v = viewsOf(email);
+      const { error } = await sb.from("document_views").upsert({ document_id: d.id, email, used: v?.used || 0, allowed: (v?.used || 0) + 1 });
+      if (error) return toast(error.message);
+      toast(`${email} can open it once more`); await refresh();
+    });
     if (act("addGroup")) act("addGroup").onclick = async () => {
       const { error } = await sb.from("group_documents").insert({ group_id: $("#dGroup").value, document_id: d.id });
       if (error) return toast(error.message);
@@ -1458,6 +1495,7 @@
         <textarea id="uEmails" placeholder="Paste email IDs, separated by commas or new lines"></textarea>
         <label for="uExp">Stop sharing on (optional)</label>
         <input id="uExp" type="datetime-local">
+        ${docOptionsHTML()}
         <div class="msg dlg-msg" role="status"></div>
       </div>
       <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Upload and share</button></div>`,
@@ -1473,7 +1511,7 @@
         const up = await sb.storage.from("documents").upload(path, file, { contentType: "application/pdf", upsert: false });
         if (up.error) throw up.error;
         const { data: doc, error } = await sb.from("documents")
-          .insert({ title, storage_path: path, expires_at: exp ? new Date(exp).toISOString() : null }).select("id").single();
+          .insert({ title, storage_path: path, expires_at: exp ? new Date(exp).toISOString() : null, ...docOptionsValue() }).select("id").single();
         if (error) { await sb.storage.from("documents").remove([path]); throw error; }
         if (valid.length) {
           const { error: aErr } = await sb.from("document_access").insert(valid.map(email => ({ document_id: doc.id, email })));
@@ -1496,13 +1534,14 @@
         <label for="eExp">Stop sharing on</label>
         <input id="eExp" type="datetime-local" value="${local}">
         <p class="hint">Leave empty to share until you turn the link off.</p>
+        ${docOptionsHTML(d)}
         <div class="msg dlg-msg" role="status"></div>
       </div>
       <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Save changes</button></div>`,
       async () => {
         const exp = $("#eExp").value;
         const { error } = await sb.from("documents")
-          .update({ title: $("#eTitle").value.trim(), expires_at: exp ? new Date(exp).toISOString() : null }).eq("id", d.id);
+          .update({ title: $("#eTitle").value.trim(), expires_at: exp ? new Date(exp).toISOString() : null, ...docOptionsValue() }).eq("id", d.id);
         if (error) throw error;
         dlg.close(); toast("Changes saved"); await refresh();
       });
@@ -1526,6 +1565,28 @@
       await refresh();
     };
     input.click();
+  }
+
+  function remindDialog(d, behind, pageCount) {
+    const notOpened = behind.filter(r => !r.mine.length), unfinished = behind.filter(r => r.mine.length);
+    const text = `Hi, a reminder to read "${d.title}"${pageCount ? ` (${pageCount} pages)` : ""}${d.expires_at ? `. It's available until ${new Date(d.expires_at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}` : ""}.\n\nOpen it in the Secure Doc Share app:\n${shareLink(d.id)}`;
+    const list = rs => rs.map(r => `<li>${esc(nameOf(r.email))}${nameOf(r.email) !== r.email ? ` <span class="muted small-text">${esc(r.email)}</span>` : ""}${r.mine.length ? ` <span class="muted small-text">page ${r.furthest} of ${pageCount}</span>` : ""}</li>`).join("");
+    openDialog(`
+      <div class="dlg-head"><h2>Remind people</h2><p class="sub" style="margin:6px 0 0">Copy the message, or open your email with everyone in BCC. Nothing is sent until you send it.</p></div>
+      <div class="dlg-body">
+        ${notOpened.length ? `<label style="margin-top:4px">Haven't opened it (${notOpened.length})</label><ul class="plain-list">${list(notOpened)}</ul>` : ""}
+        ${unfinished.length ? `<label>Haven't finished (${unfinished.length})</label><ul class="plain-list">${list(unfinished)}</ul>` : ""}
+        <label for="rmText">Message</label><textarea id="rmText" rows="6">${esc(text)}</textarea>
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Close</button>
+        <button type="button" data-rm="mail">Email them</button>
+        <button type="button" data-rm="wa">WhatsApp</button>
+        <button class="primary" type="button" data-rm="copy">Copy message</button></div>`, async () => {});
+    const msgText = () => $("#rmText").value;
+    $('[data-rm="copy"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(msgText()); toast("Message copied"); } catch { $("#rmText").select(); } };
+    $('[data-rm="wa"]', dlg).onclick = () => window.open(`https://wa.me/?text=${encodeURIComponent(msgText())}`, "_blank", "noopener");
+    $('[data-rm="mail"]', dlg).onclick = () => { location.href = `mailto:?bcc=${encodeURIComponent(behind.map(r => r.email).join(","))}&subject=${encodeURIComponent(`Reminder: ${d.title}`)}&body=${encodeURIComponent(msgText())}`; };
   }
 
   function blockDialog(email) {

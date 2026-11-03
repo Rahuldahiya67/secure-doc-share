@@ -469,3 +469,5 @@ code.upi { font-size: 14px; padding: 4px 8px; overflow-wrap: anywhere; }
 .tree summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 4px 0; }
 .tree summary::marker { color: var(--muted); }
 .req-card { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--rule); }
+.folder-head { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 20px 0 6px; }
+.plain-list { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 4px; max-height: 160px; overflow: auto; }

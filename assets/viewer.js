@@ -96,7 +96,7 @@
   // ---------------------------------------------------------------
   async function listDocuments(user) {
     const { data, error } = await sb.from("documents")
-      .select("id,title,created_at,expires_at").order("created_at", { ascending: false });
+      .select("*").order("created_at", { ascending: false });
     if (error) { root.innerHTML = `<div class="card"><p class="msg err">${esc(error.message)}</p></div>`; return; }
     if (!data.length) {
       root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2>
@@ -106,14 +106,24 @@
       requestAccess(user, $("#reqBox"));
       return;
     }
-    root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2><p class="sub">${data.length} ${data.length === 1 ? "document" : "documents"}</p>
-      <ul class="doc-list">${data.map(d => `
+    const { data: views } = data.some(d => d.one_time) ? await sb.from("document_views").select("document_id,used,allowed") : { data: [] };
+    const left = d => { const v = (views || []).find(x => x.document_id === d.id); return v ? Math.max(0, v.allowed - v.used) : 1; };
+    const folders = [...new Set(data.map(d => d.folder || ""))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+    const item = d => `
         <li><a href="?doc=${encodeURIComponent(d.id)}">
           <span class="doc-icon">${icon("file")}</span>
           <span class="grow"><span class="t">${esc(d.title)}</span>
-            <span class="s">Shared ${esc(timeAgo(d.created_at))}${d.expires_at ? `, available until ${esc(new Date(d.expires_at).toLocaleDateString())}` : ""}</span></span>
-          <span class="btn small">Open</span></a></li>`).join("")}
-      </ul></div>`;
+            <span class="s">Shared ${esc(timeAgo(d.created_at))}${d.expires_at ? `, available until ${esc(new Date(d.expires_at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}` : ""}${d.one_time ? (left(d) ? `, <strong>${left(d) === 1 ? "one view" : `${left(d)} views`} left</strong>` : ", already viewed") : ""}</span></span>
+          <span class="btn small">Open</span></a></li>`;
+    root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2><p class="sub">${data.length} ${data.length === 1 ? "document" : "documents"}</p>
+      ${folders.map(f => `${folders.length > 1 ? `<h3 class="folder-head">${esc(f || "Other documents")}</h3>` : ""}
+      <ul class="doc-list">${data.filter(d => (d.folder || "") === f).map(item).join("")}</ul>`).join("")}</div>`;
+  }
+
+  function viewUsed(doc) {
+    root.innerHTML = `<div class="card narrow"><h2>Already viewed</h2>
+      <p class="sub">"${esc(doc.title)}" could be opened only once, and you've used that view. Ask the owner if you need to see it again.</p>
+      <a class="btn" href="?view=docs">See documents shared with you</a></div>`;
   }
 
   // ---------------------------------------------------------------
@@ -164,8 +174,27 @@
       requestAccess(user, $("#reqBox"));
     };
 
-    const { data: doc, error } = await sb.from("documents").select("id,title").eq("id", id).maybeSingle();
+    const { data: doc, error } = await sb.from("documents").select("*").eq("id", id).maybeSingle();
     if (error || !doc) return noAccess();
+
+    // One-time documents: say so before using up the view.
+    if (doc.one_time) {
+      const { data: vs } = await sb.from("document_views").select("used,allowed,last_opened_at").eq("document_id", doc.id);
+      const v = vs?.[0] || { used: 0, allowed: 1 };
+      const sameSitting = v.last_opened_at && Date.now() - new Date(v.last_opened_at) < 15 * 60e3;
+      if (!sameSitting && v.used >= v.allowed) return viewUsed(doc);
+      if (!sameSitting) {
+        const left = v.allowed - v.used;
+        const go = await new Promise(res => {
+          root.innerHTML = `<div class="card narrow"><h2>${esc(doc.title)}</h2>
+            <p class="sub">You can open this document ${left === 1 ? "only once" : `${left} more times`}. Once you open it, you have 15 minutes to come back to it if the app closes.</p>
+            <button class="primary full" type="button" id="goOpen">Open now</button>
+            <a class="btn full" style="margin-top:10px" href="?view=docs">Not now</a></div>`;
+          $("#goOpen").onclick = () => res(true);
+        });
+        if (!go) return;
+      }
+    }
 
     // Ask the database for a short-lived grant; it checks the email list and the app key.
     let appKey = "";
@@ -178,6 +207,7 @@
           <a class="btn primary" href="${esc(cfg.apkUrl)}">Download the latest app</a></div>`;
         return;
       }
+      if (/view_used/.test(gErr.message)) return viewUsed(doc);
       return noAccess();
     }
 
