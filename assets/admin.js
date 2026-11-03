@@ -28,11 +28,11 @@
   // Data
   // ---------------------------------------------------------------
   const LIVE_MS = 45 * 1000;
-  const S = { docs: [], sessions: [], blocked: [] };
+  const S = { docs: [], sessions: [], blocked: [], payments: [], accounts: [], audit: [] };
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner] = await Promise.all([
       sb.from("documents")
         .select("id,title,storage_path,is_active,expires_at,created_at,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -40,7 +40,11 @@
         .select("id,document_id,email,device_id,device_label,page_count,max_page,seconds,page_seconds,started_at,last_seen_at")
         .order("started_at", { ascending: false }).limit(5000),
       sb.from("blocked_emails").select("email,reason,blocked_at").order("blocked_at", { ascending: false }),
-      sb.from("payment_submissions").select("*").order("created_at", { ascending: false }).limit(3000)
+      sb.from("payment_submissions").select("*").order("created_at", { ascending: false }).limit(3000),
+      sb.from("payment_accounts").select("*").order("sort_order").order("created_at"),
+      sb.from("app_settings").select("key,value"),
+      sb.from("audit_log").select("*").order("at", { ascending: false }).limit(300),
+      sb.rpc("is_owner")
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -49,6 +53,16 @@
     S.analyticsMissing = Boolean(sessions.error || blocked.error);
     S.payments = payments.error ? [] : payments.data || [];
     S.paymentsMissing = Boolean(payments.error);
+    S.paymentsV2 = !accounts.error && !audit.error;
+    S.accounts = accounts.error ? [] : accounts.data || [];
+    S.audit = audit.error ? [] : audit.data || [];
+    S.isOwner = owner.error ? false : Boolean(owner.data);
+    const exp = (settings.data || []).find(s => s.key === "expected_percent");
+    S.expectedPercent = exp ? Number(exp.value) : 0;
+    if (S.accounts.some(x => x.qr_path)) {
+      const { data: urls } = await sb.storage.from("payment-qr").createSignedUrls(S.accounts.filter(x => x.qr_path).map(x => x.qr_path), 3600);
+      (urls || []).forEach(u => { const x = S.accounts.find(y => y.qr_path === u.path); if (x) x.qrUrl = u.signedUrl; });
+    }
     derive();
   }
 
@@ -617,82 +631,359 @@
   // Payments
   // ---------------------------------------------------------------
   const inr = n => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const pctTxt = n => (n == null ? "–" : `${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 1 })}%`);
   const PAY_STATUS = { pending: ["warn", "Pending"], verified: ["live", "Verified"], rejected: ["off", "Rejected"] };
+  const PAID_VIA = { gpay: "Google Pay", phonepe: "PhonePe", paytm: "Paytm", upi: "Other UPI app", qr: "Scanned QR", bank: "Bank transfer", other: "Other" };
   const payTag = s => { const [c, t] = PAY_STATUS[s] || PAY_STATUS.pending; return `<span class="tag ${c}">${t}</span>`; };
+  const payDay = p => new Date(p.payout_date ? `${p.payout_date}T12:00:00` : p.created_at);
+  function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+  const weekKey = d => weekStart(d).toISOString().slice(0, 10);
 
-  function payments() {
+  // Things worth a second look on a submission.
+  function payFlags(p) {
+    const flags = [];
+    const exp = S.expectedPercent;
+    if (exp > 0 && Number(p.amount_earned) > 0) {
+      const due = (Number(p.amount_earned) * exp) / 100;
+      const short = Math.round((due - Number(p.amount_sent)) * 100) / 100;
+      if (short > 0.5) flags.push({ cls: "warn", text: `Short by ${inr(short)}` });
+    }
+    if (p.utr && S.payments.some(x => x.id !== p.id && x.utr === p.utr)) flags.push({ cls: "", text: "UTR used twice" });
+    const mine = [p.earnings_hash, p.referral_hash, p.payment_hash].filter(Boolean);
+    const twin = mine.length && S.payments.find(x => x.id !== p.id && [x.earnings_hash, x.referral_hash, x.payment_hash].some(h => h && mine.includes(h)));
+    if (twin) flags.push({ cls: "", text: twin.email === p.email ? "Same screenshot as an earlier submission" : `Same screenshot as ${twin.name}` });
+    return flags;
+  }
+  const flagsHTML = p => { const f = payFlags(p); return f.length ? `<div class="flags">${f.map(x => `<span class="flag ${x.cls}">${esc(x.text)}</span>`).join("")}</div>` : ""; };
+
+  const PAY_TABS = [["", "Submissions"], ["dashboard", "Dashboard"], ["missing", "Missing"], ["settings", "Payment settings"], ["log", "Change log"]];
+  const payTabs = active => `<nav class="tabs" aria-label="Payments">${PAY_TABS.map(([k, l]) =>
+    `<a href="#payments${k ? "/" + k : ""}" ${k === active ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>`;
+
+  function payments(tab = "") {
     if (S.paymentsMissing) {
       view.innerHTML = `${head("Payments", "Payment submissions from your people.")}
-        <div class="notice">Payments aren't switched on yet. Run <code>supabase/004_payments.sql</code> in the Supabase SQL Editor.</div>`;
+        <div class="notice">Payments aren't switched on yet. Run <code>supabase/004_payments.sql</code> and then <code>supabase/005_payments_v2.sql</code> in the Supabase SQL Editor.</div>`;
       return;
     }
+    const pages = { "": paySubmissions, dashboard: payDashboard, missing: payMissing, settings: paySettings, log: payLog };
+    (pages[tab] || paySubmissions)();
+  }
+
+  function v2Note() {
+    return S.paymentsV2 ? "" : `<div class="notice" style="margin-bottom:16px">Run <code>supabase/005_payments_v2.sql</code> in Supabase to switch on payment accounts, UTR checks, the change log and the security rules.</div>`;
+  }
+
+  function paySubmissions() {
     const P = S.payments;
     const pending = P.filter(p => p.status === "pending");
-    const verified = P.filter(p => p.status === "verified");
-    const weekAgo = Date.now() - 7 * 864e5;
     view.innerHTML = `
-      ${head("Payments", "Submissions with earnings and referral screenshots.", `<button type="button" data-act="payCsv">Download CSV</button>`)}
-      <div class="kpis">
-        ${kpi("Waiting for review", pending.length, pending.length ? `${inr(sum(pending, p => Number(p.amount_sent)))} to check` : "All caught up")}
-        ${kpi("Verified, amount sent", inr(sum(verified, p => Number(p.amount_sent))), `${verified.length} ${verified.length === 1 ? "payment" : "payments"}`)}
-        ${kpi("Verified, amount earned", inr(sum(verified, p => Number(p.amount_earned))), "As reported by submitters")}
-        ${kpi("This week", P.filter(p => new Date(p.created_at) > weekAgo).length, "submissions in 7 days")}
-      </div>
+      ${head("Payments", "Submissions with earnings, referral and payment screenshots.", `<button type="button" data-act="payCsv">Download CSV</button>`)}
+      ${payTabs("")}${v2Note()}
       <div class="panel">
         <div class="panel-head">
           <div class="row" style="flex:1">
             <select id="pStatus" style="width:auto" aria-label="Filter by status">
-              <option value="">All statuses</option><option value="pending" selected>Pending</option><option value="verified">Verified</option><option value="rejected">Rejected</option></select>
-            <input type="search" id="pQ" placeholder="Search name, email, Outlier ID or referrer" style="max-width:340px" aria-label="Search payments">
+              <option value="">All statuses</option><option value="pending" ${pending.length ? "selected" : ""}>Pending</option><option value="verified">Verified</option><option value="rejected">Rejected</option></select>
+            <label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="pFlagged"> Only flagged</label>
+            <input type="search" id="pQ" placeholder="Search name, email, Outlier ID, UTR or referrer" style="max-width:340px" aria-label="Search payments">
           </div>
           <span class="muted small-text" id="pCount"></span>
         </div>
         <div id="payTable"></div>
       </div>`;
     const filtered = () => {
-      const st = $("#pStatus").value, q = $("#pQ").value.trim().toLowerCase();
-      return P.filter(p => (!st || p.status === st) &&
-        (!q || [p.name, p.email, p.outlier_id, p.referred_by].some(v => String(v || "").toLowerCase().includes(q))));
+      const st = $("#pStatus").value, q = $("#pQ").value.trim().toLowerCase(), fl = $("#pFlagged").checked;
+      return P.filter(p => (!st || p.status === st) && (!fl || payFlags(p).length) &&
+        (!q || [p.name, p.email, p.outlier_id, p.referred_by, p.utr].some(v => String(v || "").toLowerCase().includes(q))));
     };
     const draw = () => {
       const list = filtered();
-      $("#pCount").textContent = `${list.length} shown, ${inr(sum(list, p => Number(p.amount_sent)))} sent`;
+      $("#pCount").textContent = `${list.length} shown, ${inr(sum(list, p => Number(p.amount_sent)))} paid`;
       $("#payTable").innerHTML = list.length ? `<div class="table-wrap"><table class="data">
-        <thead><tr><th>Submitted</th><th>Person</th><th class="hide-sm">Outlier ID</th><th class="hide-sm">Referred by</th>
-          <th class="num">Earned</th><th class="num">Sent</th><th>Status</th></tr></thead>
+        <thead><tr><th>Payout</th><th>Person</th><th class="hide-sm">Outlier ID / UTR</th>
+          <th class="num">Earned</th><th class="num">Paid</th><th class="num">Share</th><th>Status</th></tr></thead>
         <tbody>${list.map(p => `<tr class="clickable" tabindex="0" data-href="payment/${p.id}">
-          <td class="muted">${esc(fmtDate(p.created_at))}</td>
-          <td><div class="cell-title">${esc(p.name)}</div><div class="cell-sub">${esc(p.email)}</div></td>
-          <td class="hide-sm">${esc(p.outlier_id)}</td>
-          <td class="hide-sm muted">${esc(p.referred_by || "–")}</td>
+          <td class="muted">${esc(payDay(p).toLocaleDateString(undefined, { day: "numeric", month: "short" }))}<div class="cell-sub">sent ${esc(timeAgo(p.created_at))}</div></td>
+          <td><div class="cell-title">${esc(p.name)}</div><div class="cell-sub">${esc(p.email)}</div>${flagsHTML(p)}</td>
+          <td class="hide-sm">${esc(p.outlier_id)}<div class="cell-sub">${esc(p.utr || "No UTR")}</div></td>
           <td class="num">${inr(p.amount_earned)}</td><td class="num">${inr(p.amount_sent)}</td>
+          <td class="num">${pctTxt(p.percent_sent)}</td>
           <td>${payTag(p.status)}</td></tr>`).join("")}</tbody></table></div>`
         : emptyState(P.length ? "Nothing matches" : "No payments yet", P.length ? "Try another status or search." : "Submissions from the app appear here.");
       wireCommon();
     };
-    $("#pStatus").onchange = draw;
+    ["pStatus", "pFlagged"].forEach(id => $(`#${id}`).onchange = draw);
     $("#pQ").oninput = draw;
     $('[data-act="payCsv"]').onclick = () => {
-      const rows = [["submitted", "name", "email", "outlier_id", "referred_by", "amount_earned_inr", "amount_sent_inr", "status", "admin_note", "reviewed_by", "reviewed_at"]]
-        .concat(filtered().map(p => [p.created_at, p.name, p.email, p.outlier_id, p.referred_by || "", p.amount_earned, p.amount_sent, p.status, p.admin_note || "", p.reviewed_by || "", p.reviewed_at || ""]));
+      const acc = id => S.accounts.find(a => a.id === id)?.label || "";
+      const rows = [["submitted", "payout_date", "name", "email", "outlier_id", "referred_by", "amount_earned_inr", "amount_paid_inr", "percent", "paid_via", "paid_to", "utr", "status", "flags", "admin_note", "reviewed_by", "reviewed_at"]]
+        .concat(filtered().map(p => [p.created_at, p.payout_date || "", p.name, p.email, p.outlier_id, p.referred_by || "", p.amount_earned, p.amount_sent,
+          p.percent_sent ?? "", PAID_VIA[p.paid_via] || "", acc(p.account_id), p.utr || "", p.status, payFlags(p).map(f => f.text).join("; "),
+          p.admin_note || "", p.reviewed_by || "", p.reviewed_at || ""]));
       downloadCsv(rows, `payments-${new Date().toISOString().slice(0, 10)}.csv`);
     };
     draw();
+  }
+
+  function payDashboard() {
+    const live = S.payments.filter(p => p.status !== "rejected");
+    const verified = S.payments.filter(p => p.status === "verified");
+    const pending = S.payments.filter(p => p.status === "pending");
+    const withPct = verified.filter(p => Number(p.amount_earned) > 0);
+    const avgPct = withPct.length ? (sum(withPct, p => Number(p.amount_sent)) / sum(withPct, p => Number(p.amount_earned))) * 100 : null;
+
+    const weeks = [];
+    const thisWeek = weekStart(new Date());
+    for (let i = 11; i >= 0; i--) { const d = new Date(thisWeek); d.setDate(d.getDate() - i * 7); weeks.push({ key: d.toISOString().slice(0, 10), d, v: 0 }); }
+    live.forEach(p => { const w = weeks.find(x => x.key === weekKey(payDay(p))); if (w) w.v += Number(p.amount_sent); });
+
+    const byPerson = new Map();
+    live.forEach(p => { const r = byPerson.get(p.email) || { name: p.name, earned: 0, paid: 0, n: 0 }; r.earned += Number(p.amount_earned); r.paid += Number(p.amount_sent); r.n++; byPerson.set(p.email, r); });
+    const topEarners = [...byPerson.entries()].sort((a, b) => b[1].earned - a[1].earned).slice(0, 6);
+    const byRef = new Map();
+    live.filter(p => p.referred_by).forEach(p => {
+      const k = p.referred_by.trim().toLowerCase();
+      const r = byRef.get(k) || { label: p.referred_by.trim(), people: new Set(), earned: 0 };
+      r.people.add(p.email); r.earned += Number(p.amount_earned); byRef.set(k, r);
+    });
+    const topRefs = [...byRef.values()].sort((a, b) => b.people.size - a.people.size || b.earned - a.earned).slice(0, 6);
+
+    view.innerHTML = `
+      ${head("Payments", "How much is coming in, and from whom.")}
+      ${payTabs("dashboard")}
+      <div class="kpis">
+        ${kpi("Received (verified)", inr(sum(verified, p => Number(p.amount_sent))), `${verified.length} ${verified.length === 1 ? "payment" : "payments"}`)}
+        ${kpi("Waiting for review", inr(sum(pending, p => Number(p.amount_sent))), `${pending.length} ${pending.length === 1 ? "submission" : "submissions"}`)}
+        ${kpi("Average share paid", pctTxt(avgPct), S.expectedPercent ? `Expected ${S.expectedPercent}%` : "Of verified earnings")}
+        ${kpi("People paying", byPerson.size, `${inr(sum([...byPerson.values()], r => r.earned))} earned in total`)}
+      </div>
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-head"><h2>Paid per week</h2><span class="muted small-text">Last 12 weeks, by payout date, pending and verified</span></div>
+        <div class="panel-body"><div id="weekChart"></div></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel"><div class="panel-head"><h2>Top earners</h2><span class="muted small-text">Earned, and paid</span></div>
+          ${topEarners.length ? `<ul class="rank">${topEarners.map(([email, r]) => `<li><span><a href="#person/${encodeURIComponent(email)}">${esc(r.name)}</a>
+            <span class="cell-sub">${r.n} ${r.n === 1 ? "payout" : "payouts"}</span></span>
+            <span class="v">${inr(r.earned)}<span class="cell-sub" style="text-align:right">${inr(r.paid)} paid</span></span></li>`).join("")}</ul>`
+            : emptyState("No payments yet", "Top earners show up here.")}</div>
+        <div class="panel"><div class="panel-head"><h2>Top referrers</h2><span class="muted small-text">From "referred by"</span></div>
+          ${topRefs.length ? `<ul class="rank">${topRefs.map(r => `<li><span>${esc(r.label)}<span class="cell-sub">${r.people.size} ${r.people.size === 1 ? "person" : "people"} referred</span></span>
+            <span class="v">${inr(r.earned)}<span class="cell-sub" style="text-align:right">team earnings</span></span></li>`).join("")}</ul>`
+            : emptyState("No referrals yet", "Shows once people fill in who referred them.")}</div>
+      </div>`;
+    barChart($("#weekChart"), weeks.map(w => ({ label: w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), value: w.v, tip: `Week of ${w.d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}: ${inr(w.v)}` })),
+      { fmt: v => v === 0 ? "0" : v >= 1000 ? `₹${Math.round(v / 100) / 10}k` : `₹${Math.round(v)}`, height: 200 });
+  }
+
+  function payMissing() {
+    const live = S.payments.filter(p => p.status !== "rejected");
+    const thisKey = weekKey(new Date());
+    const last = new Date(weekStart(new Date())); last.setDate(last.getDate() - 7);
+    const lastKey = last.toISOString().slice(0, 10);
+    const byEmail = groupBy(live, p => p.email);
+    const lastWeekOnly = [...byEmail.entries()].filter(([, l]) => l.some(p => weekKey(payDay(p)) === lastKey) && !l.some(p => weekKey(payDay(p)) === thisKey))
+      .map(([email, l]) => ({ email, name: l[0].name, last: l[0] }));
+    const everPaid = new Set(S.payments.map(p => p.email));
+    const never = [...D.people.keys()].filter(e => !everPaid.has(e) && !D.blocked.has(e)).sort();
+    const reminder = `Hi, a reminder to submit this week's payment in the Secure Doc Share app (Submit a payment).`;
+
+    view.innerHTML = `
+      ${head("Payments", "Who hasn't paid yet.")}
+      ${payTabs("missing")}
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Paid last week, not this week</h2><span class="muted small-text">Week starting ${esc(new Date(`${thisKey}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</span></div>
+          ${lastWeekOnly.length ? `<ul class="rank">${lastWeekOnly.map(r => `<li><span><a href="#person/${encodeURIComponent(r.email)}">${esc(r.name)}</a><span class="cell-sub">${esc(r.email)}</span></span>
+            <span class="v">${inr(r.last.amount_sent)}<span class="cell-sub" style="text-align:right">last time</span></span></li>`).join("")}</ul>`
+            : emptyState("Everyone's up to date", "Nobody who paid last week is missing this week.")}
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Never submitted</h2><span class="muted small-text">People with document access</span></div>
+          ${never.length ? `<ul class="rank">${never.slice(0, 200).map(e => `<li><a href="#person/${encodeURIComponent(e)}">${esc(e)}</a></li>`).join("")}</ul>`
+            : emptyState("No one missing", "Everyone with access has submitted at least once.")}
+        </div>
+      </div>
+      <div class="panel section-gap"><div class="panel-body">
+        <label for="remind" style="margin-top:0">Reminder message</label>
+        <div class="linkbox"><input id="remind" type="text" value="${esc(reminder)}"><button type="button" data-act="copyRemind">Copy</button>
+          <a class="btn" target="_blank" rel="noopener" id="waRemind" href="https://wa.me/?text=${encodeURIComponent(reminder)}">WhatsApp</a></div>
+      </div></div>`;
+    $('[data-act="copyRemind"]').onclick = async () => { try { await navigator.clipboard.writeText($("#remind").value); toast("Message copied"); } catch { $("#remind").select(); } };
+    $("#remind").oninput = () => { $("#waRemind").href = `https://wa.me/?text=${encodeURIComponent($("#remind").value)}`; };
+  }
+
+  function qrSvg(a) {
+    if (!a.upi_id || !window.qrcode) return "";
+    const q = window.qrcode(0, "M");
+    q.addData(`upi://pay?${new URLSearchParams({ pa: a.upi_id, pn: a.payee_name, cu: "INR" }).toString().replace(/\+/g, "%20")}`);
+    q.make();
+    return q.createSvgTag({ cellSize: 3, margin: 1, scalable: true });
+  }
+
+  async function paySettings() {
+    const owner = S.isOwner;
+    view.innerHTML = `
+      ${head("Payments", "Where people pay, and what you expect them to pay.",
+        owner && S.paymentsV2 ? `<button class="primary" type="button" data-act="addAcct">Add payment account</button>` : "")}
+      ${payTabs("settings")}${v2Note()}
+      ${owner ? "" : `<div class="notice" style="margin-bottom:16px">Only the owner can change payment accounts and the expected share. You can view them.</div>`}
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-head"><h2>Payment accounts</h2><span class="muted small-text">Shown to people in step 3 of the form</span></div>
+        <div id="acctList"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Expected share</h2></div>
+        <div class="panel-body row">
+          <label for="expPct" style="margin:0">People should pay</label>
+          <input id="expPct" type="number" min="0" max="100" step="0.5" value="${S.expectedPercent ?? ""}" style="width:110px" ${owner ? "" : "disabled"}>
+          <span>% of what they earn</span>
+          ${owner ? `<button type="button" data-act="saveExp">Save</button>` : ""}
+        </div>
+        <p class="hint" style="padding:0 18px 14px;margin:0">Submissions below this are flagged "Short by ₹…". Set 0 to turn the check off.</p>
+      </div>`;
+
+    const list = $("#acctList");
+    list.innerHTML = S.accounts.length ? S.accounts.map(a => `
+      <div class="acct">
+        <div class="qr">${a.qrUrl ? `<img src="${esc(a.qrUrl)}" alt="">` : qrSvg(a)}</div>
+        <div class="grow"><div class="cell-title">${esc(a.label)} ${a.is_active ? `<span class="tag live">Shown</span>` : `<span class="tag plain">Hidden</span>`}</div>
+          <div class="cell-sub">${esc(a.payee_name)}${a.upi_id ? `, ${esc(a.upi_id)}` : ""}${a.qr_path ? ", own QR image" : ""}</div>
+          ${a.instructions ? `<div class="cell-sub">${esc(a.instructions)}</div>` : ""}</div>
+        ${owner ? `<div class="row"><button class="small" type="button" data-edit="${a.id}">Edit</button>
+          <button class="small" type="button" data-toggle="${a.id}">${a.is_active ? "Hide" : "Show"}</button>
+          <button class="small danger" type="button" data-del="${a.id}">Delete</button></div>` : ""}
+      </div>`).join("") : emptyState("No payment accounts yet", owner ? "Add your UPI ID so people can pay from the form." : "The owner hasn't added any yet.");
+
+    if (!owner) return;
+    const addBtn = $('[data-act="addAcct"]'); if (addBtn) addBtn.onclick = () => acctDialog(null);
+    $$("[data-edit]", view).forEach(b => b.onclick = () => acctDialog(S.accounts.find(a => a.id === b.dataset.edit)));
+    $$("[data-toggle]", view).forEach(b => b.onclick = async () => {
+      const a = S.accounts.find(x => x.id === b.dataset.toggle);
+      const { error } = await sb.from("payment_accounts").update({ is_active: !a.is_active }).eq("id", a.id);
+      if (error) return toast(error.message);
+      toast(a.is_active ? "Hidden from the form" : "Shown in the form"); await refresh();
+    });
+    $$("[data-del]", view).forEach(b => b.onclick = () => {
+      const a = S.accounts.find(x => x.id === b.dataset.del);
+      confirmDialog({ title: `Delete "${a.label}"?`, text: "People won't see it in the form any more. Past submissions keep their record of what was paid.", confirm: "Delete account", danger: true,
+        run: async () => {
+          if (a.qr_path) await sb.storage.from("payment-qr").remove([a.qr_path]);
+          const { error } = await sb.from("payment_accounts").delete().eq("id", a.id);
+          if (error) throw error;
+          toast("Account deleted"); await refresh();
+        } });
+    });
+    const save = $('[data-act="saveExp"]');
+    if (save) save.onclick = async () => {
+      const v = Number($("#expPct").value);
+      if (!(v >= 0 && v <= 100)) return toast("Enter a percentage from 0 to 100.");
+      const { error } = await sb.from("app_settings").upsert({ key: "expected_percent", value: v, updated_at: new Date().toISOString() });
+      if (error) return toast(error.message);
+      toast(v ? `Expected share set to ${v}%` : "Short-payment check turned off"); await refresh();
+    };
+  }
+
+  function acctDialog(a) {
+    openDialog(`
+      <div class="dlg-head"><h2>${a ? "Edit payment account" : "Add payment account"}</h2>
+        <p class="sub" style="margin:6px 0 0">People see these details in the payment form. Every change is recorded in the change log.</p></div>
+      <div class="dlg-body">
+        <label for="aLabel">Name for this account</label>
+        <input id="aLabel" type="text" required maxlength="60" placeholder="e.g. Main UPI" value="${esc(a?.label || "")}">
+        <label for="aPayee">Payee name, exactly as your UPI app shows it</label>
+        <input id="aPayee" type="text" required maxlength="80" value="${esc(a?.payee_name || "")}">
+        <label for="aUpi">UPI ID</label>
+        <input id="aUpi" type="text" maxlength="200" placeholder="name@okaxis" autocomplete="off" value="${esc(a?.upi_id || "")}">
+        <label for="aQr">Your own QR image (optional)</label>
+        <div class="file-drop"><input id="aQr" type="file" accept="image/png,image/jpeg,image/webp"></div>
+        <p class="hint">Without one, a QR is made from the UPI ID with the amount built in.${a?.qr_path ? ` <label class="row" style="display:inline-flex;margin:0;gap:6px;font-weight:400"><input type="checkbox" id="aQrRemove"> Remove the current QR image</label>` : ""}</p>
+        <label for="aInstr">Instructions (optional)</label>
+        <input id="aInstr" type="text" maxlength="400" placeholder="e.g. Add your Outlier ID in the payment note" value="${esc(a?.instructions || "")}">
+        <label for="aSort">Order</label>
+        <input id="aSort" type="number" step="1" style="width:110px" value="${a?.sort_order ?? S.accounts.length}">
+        <div class="msg dlg-msg" role="status"></div>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Cancel</button><button class="primary" type="submit">${a ? "Save changes" : "Add account"}</button></div>`,
+      async () => {
+        const upi = $("#aUpi").value.trim();
+        if (upi && !/^[A-Za-z0-9._-]{2,128}@[A-Za-z][A-Za-z0-9.-]{1,63}$/.test(upi)) throw new Error("That doesn't look like a UPI ID. It should look like name@bank.");
+        const file = $("#aQr").files[0];
+        let qr_path = a?.qr_path || null;
+        if ($("#aQrRemove")?.checked) qr_path = null;
+        if (file) {
+          if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error("The QR image must be PNG, JPG or WebP.");
+          qr_path = `${crypto.randomUUID()}.${file.type.split("/")[1].replace("jpeg", "jpg")}`;
+          const up = await sb.storage.from("payment-qr").upload(qr_path, file, { contentType: file.type, upsert: false });
+          if (up.error) throw up.error;
+        }
+        if (!upi && !qr_path) throw new Error("Add a UPI ID or a QR image.");
+        const row = { label: $("#aLabel").value.trim(), payee_name: $("#aPayee").value.trim(), upi_id: upi || null, qr_path,
+          instructions: $("#aInstr").value.trim() || null, sort_order: Number($("#aSort").value) || 0 };
+        const { error } = a ? await sb.from("payment_accounts").update(row).eq("id", a.id) : await sb.from("payment_accounts").insert(row);
+        if (error) throw error;
+        if (a?.qr_path && a.qr_path !== qr_path) await sb.storage.from("payment-qr").remove([a.qr_path]);
+        dlg.close(); toast(a ? "Account updated" : "Account added"); await refresh();
+      });
+  }
+
+  function auditSummary(r) {
+    const o = r.old_data || {}, n = r.new_data || {};
+    const changed = Object.keys({ ...o, ...n }).filter(k => !["updated_at", "created_at"].includes(k) && JSON.stringify(o[k]) !== JSON.stringify(n[k]));
+    const fmt = v => (v === null || v === undefined || v === "" ? "empty" : typeof v === "object" ? JSON.stringify(v) : String(v));
+    if (r.table_name === "payment_accounts") {
+      const name = n.label || o.label || "account";
+      if (r.action === "insert") return `Added payment account "${name}" (${fmt(n.upi_id)}, ${fmt(n.payee_name)})`;
+      if (r.action === "delete") return `Deleted payment account "${name}" (${fmt(o.upi_id)})`;
+      return `Changed payment account "${name}": ${changed.map(k => `${k.replace(/_/g, " ")} ${fmt(o[k])} → ${fmt(n[k])}`).join(", ")}`;
+    }
+    if (r.table_name === "payment_submissions") {
+      const who = n.name || o.name || "someone";
+      if (r.action === "delete") return `Deleted the ${inr(o.amount_sent)} submission from ${who}`;
+      if (changed.includes("status")) return `${n.status === "verified" ? "Verified" : n.status === "rejected" ? "Rejected" : "Moved back to pending"} the ${inr(n.amount_sent)} submission from ${who}${n.admin_note ? ` (note: ${n.admin_note})` : ""}`;
+      return `Edited the submission from ${who}: ${changed.join(", ")}`;
+    }
+    if (r.table_name === "app_settings") return `Set ${String(n.key || o.key).replace(/_/g, " ")} to ${fmt(n.value)}${o.value !== undefined ? ` (was ${fmt(o.value)})` : ""}`;
+    if (r.table_name === "admins") {
+      if (r.action === "insert") return `Made ${n.email} an ${n.role || "admin"}`;
+      if (r.action === "delete") return `Removed ${o.email} as ${o.role || "admin"}`;
+      return `Changed ${n.email}'s role ${fmt(o.role)} → ${fmt(n.role)}`;
+    }
+    return `${r.action} on ${r.table_name}`;
+  }
+
+  function payLog() {
+    const L = S.audit;
+    view.innerHTML = `
+      ${head("Payments", "Every change to payment accounts, reviews, settings and admins. Recorded by the database, can't be edited.")}
+      ${payTabs("log")}${v2Note()}
+      <div class="panel">${L.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>When</th><th>Who</th><th>What happened</th></tr></thead>
+        <tbody>${L.map(r => {
+          const money = r.table_name === "payment_accounts" || r.table_name === "admins";
+          return `<tr><td class="muted">${esc(fmtDate(r.at))}</td><td>${esc(r.actor)}</td>
+            <td style="white-space:normal">${money ? `<span class="flag warn">Payment details</span> ` : ""}${esc(auditSummary(r))}</td></tr>`;
+        }).join("")}</tbody></table></div>` : emptyState("Nothing recorded yet", "Changes appear here as they happen.")}</div>`;
   }
 
   async function paymentDetail(id) {
     const p = S.payments.find(x => x.id === id);
     if (!p) { view.innerHTML = head("Payment not found", "It may have been deleted.", "", backLink("#payments", "Payments")); return; }
     const others = S.payments.filter(x => x.email === p.email && x.id !== p.id);
+    const acct = S.accounts.find(a => a.id === p.account_id);
+    const flags = payFlags(p);
+    const exp = S.expectedPercent;
+    const shots = [["Earnings (payouts)", p.earnings_path], ["Referral", p.referral_path], ["Payment successful", p.payment_path]].filter(s => s[1]);
     view.innerHTML = `
       ${head(`${p.name}`, `${payTag(p.status)}&nbsp; Submitted ${esc(fmtDate(p.created_at))}${p.reviewed_at ? `, reviewed ${esc(fmtDate(p.reviewed_at))} by ${esc(p.reviewed_by || "admin")}` : ""}`,
         `<button type="button" class="danger" data-act="payDelete">Delete</button>`, backLink("#payments", "Payments"))}
+      ${flags.length ? `<div class="notice" style="margin-bottom:16px;border-style:solid;color:var(--ink-2)"><strong>Check this one:</strong> ${flags.map(f => esc(f.text)).join(", ")}.</div>` : ""}
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>Screenshots</h2><span class="muted small-text">Tap to open full size</span></div>
-          <div class="panel-body"><div class="proofs" id="proofs">
-            <figure><figcaption>Earnings (payouts)</figcaption><a target="_blank" rel="noopener" id="pfE"><p class="muted small-text" style="padding:16px">Loading…</p></a></figure>
-            <figure><figcaption>Referral</figcaption><a target="_blank" rel="noopener" id="pfR"><p class="muted small-text" style="padding:16px">Loading…</p></a></figure>
+          <div class="panel-body"><div class="proofs">
+            ${shots.map((s, i) => `<figure><figcaption>${s[0]}</figcaption><a target="_blank" rel="noopener noreferrer" id="pf${i}"><p class="muted small-text" style="padding:16px">Loading…</p></a></figure>`).join("")}
           </div></div>
         </div>
         <div>
@@ -703,27 +994,33 @@
               <dt>Email</dt><dd><a href="#person/${encodeURIComponent(p.email)}">${esc(p.email)}</a></dd>
               <dt>Outlier ID</dt><dd>${esc(p.outlier_id)}</dd>
               <dt>Referred by</dt><dd>${esc(p.referred_by || "–")}</dd>
+              <dt>Payout date</dt><dd>${p.payout_date ? esc(new Date(`${p.payout_date}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })) : "–"}</dd>
               <dt>Amount earned</dt><dd>${inr(p.amount_earned)}</dd>
-              <dt>Amount sent</dt><dd><strong>${inr(p.amount_sent)}</strong></dd>
-              <dt>Other submissions</dt><dd>${others.length ? `${others.length}, ${inr(sum(others, x => Number(x.amount_sent)))} sent in total` : "None"}</dd>
-            </dl></div>
+              <dt>Amount paid</dt><dd><strong>${inr(p.amount_sent)}</strong> (${pctTxt(p.percent_sent)}${exp ? `, expected ${exp}% = ${inr((Number(p.amount_earned) * exp) / 100)}` : ""})</dd>
+              <dt>Paid using</dt><dd>${esc(PAID_VIA[p.paid_via] || "–")}${acct ? ` to ${esc(acct.label)} (${esc(acct.upi_id || "QR")})` : ""}</dd>
+              <dt>UTR</dt><dd>${p.utr ? `<code>${esc(p.utr)}</code> <button class="small ghost" type="button" data-copy-utr>Copy</button>` : "–"}</dd>
+              <dt>Other submissions</dt><dd>${others.length ? `${others.length}, ${inr(sum(others, x => Number(x.amount_sent)))} paid in total` : "None"}</dd>
+            </dl>
+            <p class="hint" style="margin-top:12px">Check the UTR and amount in your UPI or bank history before verifying. Screenshots can be edited.</p></div>
           </div>
           <div class="panel section-gap">
             <div class="panel-head"><h2>Review</h2></div>
             <div class="panel-body">
               <label for="payNote" style="margin-top:0">Note to the person (optional)</label>
-              <textarea id="payNote" rows="3" style="min-height:72px" placeholder="e.g. Referral screenshot doesn't match the amount">${esc(p.admin_note || "")}</textarea>
+              <textarea id="payNote" rows="3" style="min-height:72px" placeholder="e.g. Payment not received for this UTR">${esc(p.admin_note || "")}</textarea>
               <div class="row" style="margin-top:12px">
                 <button type="button" class="primary" data-review="verified">Mark verified</button>
                 <button type="button" class="danger" data-review="rejected">Reject</button>
                 ${p.status !== "pending" ? `<button type="button" class="ghost" data-review="pending">Move back to pending</button>` : ""}
               </div>
-              <p class="hint">They see the status and your note in the app.</p>
+              <p class="hint">They see the status and your note in the app. Verified payments can't have their amounts or UTR changed.</p>
             </div>
           </div>
         </div>
       </div>`;
 
+    const cu = $("[data-copy-utr]", view);
+    if (cu) cu.onclick = async () => { try { await navigator.clipboard.writeText(p.utr); toast("UTR copied"); } catch { toast(p.utr); } };
     $$("[data-review]", view).forEach(b => b.onclick = async () => {
       const status = b.dataset.review;
       const note = $("#payNote").value.trim() || null;
@@ -740,10 +1037,10 @@
     });
     $('[data-act="payDelete"]').onclick = () => confirmDialog({
       title: `Delete this submission from ${p.name}?`,
-      text: "The submission and both screenshots are removed for good.",
+      text: "The submission and its screenshots are removed for good. The change log keeps a record that it was deleted.",
       confirm: "Delete submission", danger: true,
       run: async () => {
-        await sb.storage.from("payment-proofs").remove([p.earnings_path, p.referral_path]);
+        await sb.storage.from("payment-proofs").remove(shots.map(s => s[1]));
         const { error } = await sb.from("payment_submissions").delete().eq("id", p.id);
         if (error) throw error;
         toast("Submission deleted");
@@ -753,11 +1050,11 @@
     });
 
     // Short-lived links to the private screenshots.
-    const { data } = await sb.storage.from("payment-proofs").createSignedUrls([p.earnings_path, p.referral_path], 600);
-    [["#pfE", 0], ["#pfR", 1]].forEach(([sel, i]) => {
-      const a = $(sel, view); if (!a) return;
+    const { data } = await sb.storage.from("payment-proofs").createSignedUrls(shots.map(s => s[1]), 600);
+    shots.forEach((s, i) => {
+      const a = $(`#pf${i}`, view); if (!a) return;
       const url = data?.[i]?.signedUrl;
-      if (url) { a.href = url; a.innerHTML = `<img src="${esc(url)}" alt="${i ? "Referral" : "Earnings"} screenshot">`; }
+      if (url) { a.href = url; a.innerHTML = `<img src="${esc(url)}" alt="${esc(s[0])} screenshot">`; }
       else a.innerHTML = `<p class="muted small-text" style="padding:16px">Screenshot not found.</p>`;
     });
   }

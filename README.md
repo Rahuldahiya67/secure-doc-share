@@ -97,7 +97,15 @@ After signing in, people see two options: **Shared documents** and **Submit a pa
 
 Owners review them under **Payments** in `admin.html`: view both screenshots, mark Verified or Rejected with a note the person sees, filter, search, and download a CSV.
 
-Run `supabase/004_payments.sql` to switch it on. Submissions and screenshots are private: each person can only read their own, and only admins can review. The form also works in a normal browser at `?view=pay`.
+Run `supabase/004_payments.sql` to switch it on, then `supabase/005_payments_v2.sql` for:
+
+- **Where to pay:** payment accounts managed under **Payments → Payment settings**. The form shows the payee name, UPI ID with a copy button, a QR code (generated with the amount, or your own image), and buttons that open Google Pay, PhonePe, Paytm or any UPI app with the amount filled in.
+- **Live percentage:** "You're paying 45% of your earnings" as people type, plus an expected share you set. Submissions below it are flagged "Short by ₹…".
+- **Proof:** payout date, paid using, UTR number and an optional payment screenshot.
+- **Dashboard and Missing tabs:** paid per week, top earners and referrers, people who paid last week but not this week, and people who never submitted.
+- **Security:** only the owner can change payment accounts or the expected share. A UTR can't be reused, people are limited to 10 submissions a day, amounts are capped at ₹10 lakh, and verified submissions are locked. A database-written change log records every payment-account change, review, setting change and admin change. Pages use a Content Security Policy, and CDN scripts are pinned with integrity hashes.
+
+Make yourself the owner after running it: `update public.admins set role = 'owner' where email = 'you@gmail.com';` Submissions and screenshots are private: each person can only read their own, and only admins can review. The form also works in a normal browser at `?view=pay`.
 
 ## Using it
 1. Open `…/secure-doc-share/admin.html` and sign in.

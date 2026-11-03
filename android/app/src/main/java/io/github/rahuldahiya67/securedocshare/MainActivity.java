@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.WindowManager;
+import android.widget.Toast;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -181,16 +182,28 @@ public class MainActivity extends Activity {
                 && (path.startsWith(PATH_PREFIX) || path.equals("/secure-doc-share"));
     }
 
+    // Payment apps the page may open: generic UPI, Google Pay, PhonePe, Paytm.
+    private static final String[] PAY_SCHEMES = {"upi", "tez", "phonepe", "paytmmp"};
+
+    private static boolean isPayScheme(String scheme) {
+        if (scheme == null) return false;
+        for (String s : PAY_SCHEMES) if (s.equalsIgnoreCase(scheme)) return true;
+        return false;
+    }
+
     private void openExternal(String url) {
+        Uri u;
+        try { u = Uri.parse(url); } catch (Exception e) { return; }
+        String scheme = u.getScheme();
+        boolean web = "https".equals(scheme) || "http".equals(scheme);
+        boolean pay = isPayScheme(scheme) && "pay".equals(u.getHost()) || isPayScheme(scheme) && "upi".equals(u.getHost());
+        if (!web && !pay) return;
         try {
-            Uri u = Uri.parse(url);
-            String scheme = u.getScheme();
-            if (!"https".equals(scheme) && !"http".equals(scheme)) return;
             Intent i = new Intent(Intent.ACTION_VIEW, u);
-            i.addCategory(Intent.CATEGORY_BROWSABLE);
-            startActivity(i);
-        } catch (Exception ignored) {
-            // No browser available; nothing to do.
+            if (web) i.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(pay && "upi".equalsIgnoreCase(scheme) ? Intent.createChooser(i, "Pay with") : i);
+        } catch (Exception e) {
+            if (pay) Toast.makeText(this, "That payment app isn't installed. Try another option.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -215,6 +228,11 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean supportsUpload() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean supportsUpi() {
             return true;
         }
 
