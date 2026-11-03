@@ -7,35 +7,63 @@
 
   const params = new URLSearchParams(location.search);
   let docId = params.get("doc");
+  let viewName = params.get("view") || "";
 
-  // Documents open only inside the Android app. The database enforces this too
-  // (start_view needs the app key), so this screen is just the friendly part.
-  if (!inApp) { $("#bar").remove(); renderAppGate(docId); return; }
-
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-
-  // Coming back from Google sign-in: restore the document they were opening.
-  if (!docId) {
+  // Coming back from Google sign-in in the app: restore where they were going.
+  if (inApp && !docId && !viewName) {
     try {
       const pending = localStorage.getItem("pendingDoc");
       if (pending) { localStorage.removeItem("pendingDoc"); docId = pending; }
+      const pv = localStorage.getItem("pendingView");
+      if (pv) { localStorage.removeItem("pendingView"); viewName = pv; }
     } catch (_) {}
+  }
+
+  // Documents open only inside the Android app. The database enforces this too
+  // (start_view needs the app key), so this screen is just the friendly part.
+  // The payment form works in a browser as well.
+  if (!inApp && (docId || viewName === "docs")) { $("#bar").remove(); renderAppGate(docId); return; }
+
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   }
 
   const user = await getUser();
   if (!user) {
     $("#bar").remove();
     renderSignIn(root, {
-      title: docId ? "Sign in to open this document" : "Sign in",
-      subtitle: "Use the Google account whose email the owner shared this with."
+      title: docId ? "Sign in to open this document" : viewName === "pay" ? "Sign in to submit a payment" : "Sign in",
+      subtitle: docId ? "Use the Google account whose email the owner shared this with." : "Use your Google account."
     });
     return;
   }
   renderHeader(user);
 
   if (docId) await openDocument(docId, user);
-  else await listDocuments(user);
+  else if (viewName === "pay") await window.Payments.render(root, user);
+  else if (viewName === "docs") await listDocuments(user);
+  else renderHome(user);
+
+  // ---------------------------------------------------------------
+  function renderHome(user) {
+    const first = (user.user_metadata?.full_name || user.user_metadata?.name || "").split(" ")[0];
+    root.innerHTML = `
+      <div class="home-head"><h1>${first ? `Hi ${esc(first)}` : "Welcome"}</h1>
+        <p class="sub" style="margin:6px 0 0">What would you like to do?</p></div>
+      <div class="home-tiles">
+        <a class="tile" href="?view=docs">
+          <span class="tile-icon">${icon("docs")}</span>
+          <span class="tile-text"><span class="t">Shared documents</span>
+          <span class="s">${inApp ? "Read the documents shared with you." : "Opens in the Android app."}</span></span>
+        </a>
+        <a class="tile" href="?view=pay">
+          <span class="tile-icon">${icon("upload")}</span>
+          <span class="tile-text"><span class="t">Submit a payment</span>
+          <span class="s">Send your earnings, payment and screenshots for review.</span></span>
+        </a>
+      </div>`;
+  }
 
   // ---------------------------------------------------------------
   function renderAppGate(id) {
@@ -71,12 +99,12 @@
       .select("id,title,created_at,expires_at").order("created_at", { ascending: false });
     if (error) { root.innerHTML = `<div class="card"><p class="msg err">${esc(error.message)}</p></div>`; return; }
     if (!data.length) {
-      root.innerHTML = `<div class="card"><h2>Shared with you</h2>
+      root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2>
         <div class="empty"><strong>Nothing here yet</strong>
         Documents shared with ${esc(user.email)} will appear here. If you expected one, ask the owner to check your email ID.</div></div>`;
       return;
     }
-    root.innerHTML = `<div class="card"><h2>Shared with you</h2><p class="sub">${data.length} ${data.length === 1 ? "document" : "documents"}</p>
+    root.innerHTML = `<a href="./" class="back">${icon("back")} Home</a><div class="card"><h2>Shared with you</h2><p class="sub">${data.length} ${data.length === 1 ? "document" : "documents"}</p>
       <ul class="doc-list">${data.map(d => `
         <li><a href="?doc=${encodeURIComponent(d.id)}">
           <span class="doc-icon">${icon("file")}</span>
@@ -93,7 +121,7 @@
     const noAccess = () => {
       root.innerHTML = `<div class="card narrow"><h2>You don't have access</h2>
         <p class="sub">${esc(user.email)} isn't on the list for this document, or the link was turned off or has expired. Ask the owner to check your email ID.</p>
-        <a class="btn" href="./">See documents shared with you</a></div>`;
+        <a class="btn" href="?view=docs">See documents shared with you</a></div>`;
     };
 
     const { data: doc, error } = await sb.from("documents").select("id,title").eq("id", id).maybeSingle();
@@ -119,7 +147,7 @@
 
     root.innerHTML = `
       <div class="viewer">
-        <a href="./" class="back">${icon("back")} All documents</a>
+        <a href="?view=docs" class="back">${icon("back")} All documents</a>
         <div class="reader-head"><h1>${esc(doc.title)}</h1><span class="tag live">View only</span></div>
         <div class="viewer-banner">${icon("lock")}<span>Viewing as <strong>${esc(user.email)}</strong>. Screenshots and recording are blocked, and every page carries your email.</span></div>
         <div class="pages" id="pages"><p class="muted">Loading document…</p></div>

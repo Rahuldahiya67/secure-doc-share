@@ -32,20 +32,23 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked] = await Promise.all([
+    const [docs, sessions, blocked, payments] = await Promise.all([
       sb.from("documents")
         .select("id,title,storage_path,is_active,expires_at,created_at,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
       sb.from("view_sessions")
         .select("id,document_id,email,device_id,device_label,page_count,max_page,seconds,page_seconds,started_at,last_seen_at")
         .order("started_at", { ascending: false }).limit(5000),
-      sb.from("blocked_emails").select("email,reason,blocked_at").order("blocked_at", { ascending: false })
+      sb.from("blocked_emails").select("email,reason,blocked_at").order("blocked_at", { ascending: false }),
+      sb.from("payment_submissions").select("*").order("created_at", { ascending: false }).limit(3000)
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
     S.sessions = sessions.error ? [] : sessions.data || [];
     S.blocked = blocked.error ? [] : blocked.data || [];
     S.analyticsMissing = Boolean(sessions.error || blocked.error);
+    S.payments = payments.error ? [] : payments.data || [];
+    S.paymentsMissing = Boolean(payments.error);
     derive();
   }
 
@@ -107,6 +110,7 @@
     ["documents", "Documents", "docs"],
     ["people", "People", "people"],
     ["activity", "Activity", "activity"],
+    ["payments", "Payments", "wallet"],
     ["blocked", "Blocked", "block"]
   ];
 
@@ -129,13 +133,15 @@
 
   function route(silent) {
     const [name, arg] = decodeURIComponent(location.hash.slice(1) || "overview").split("/");
-    const section = { doc: "documents", person: "people" }[name] || name;
+    const section = { doc: "documents", person: "people", payment: "payments" }[name] || name;
     $$("[data-nav]").forEach(a => { if (a.dataset.nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
     $('[data-count="documents"]').textContent = S.docs.length || "";
     $('[data-count="people"]').textContent = D.people.size || "";
     $('[data-count="blocked"]').textContent = S.blocked.length || "";
+    const pendingPays = S.payments.filter(p => p.status === "pending").length;
+    $('[data-count="payments"]').textContent = pendingPays ? `${pendingPays} new` : "";
 
-    const pages = { overview, documents, doc: docDetail, people, person: personDetail, activity, blocked };
+    const pages = { overview, documents, doc: docDetail, people, person: personDetail, activity, blocked, payments, payment: paymentDetail };
     (pages[name] || overview)(arg);
     if (!silent) { window.scrollTo(0, 0); }
   }
@@ -605,6 +611,164 @@
       if (error) return toast(error.message);
       toast(`${b.dataset.unblock} unblocked`); await refresh();
     });
+  }
+
+  // ---------------------------------------------------------------
+  // Payments
+  // ---------------------------------------------------------------
+  const inr = n => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const PAY_STATUS = { pending: ["warn", "Pending"], verified: ["live", "Verified"], rejected: ["off", "Rejected"] };
+  const payTag = s => { const [c, t] = PAY_STATUS[s] || PAY_STATUS.pending; return `<span class="tag ${c}">${t}</span>`; };
+
+  function payments() {
+    if (S.paymentsMissing) {
+      view.innerHTML = `${head("Payments", "Payment submissions from your people.")}
+        <div class="notice">Payments aren't switched on yet. Run <code>supabase/004_payments.sql</code> in the Supabase SQL Editor.</div>`;
+      return;
+    }
+    const P = S.payments;
+    const pending = P.filter(p => p.status === "pending");
+    const verified = P.filter(p => p.status === "verified");
+    const weekAgo = Date.now() - 7 * 864e5;
+    view.innerHTML = `
+      ${head("Payments", "Submissions with earnings and referral screenshots.", `<button type="button" data-act="payCsv">Download CSV</button>`)}
+      <div class="kpis">
+        ${kpi("Waiting for review", pending.length, pending.length ? `${inr(sum(pending, p => Number(p.amount_sent)))} to check` : "All caught up")}
+        ${kpi("Verified, amount sent", inr(sum(verified, p => Number(p.amount_sent))), `${verified.length} ${verified.length === 1 ? "payment" : "payments"}`)}
+        ${kpi("Verified, amount earned", inr(sum(verified, p => Number(p.amount_earned))), "As reported by submitters")}
+        ${kpi("This week", P.filter(p => new Date(p.created_at) > weekAgo).length, "submissions in 7 days")}
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div class="row" style="flex:1">
+            <select id="pStatus" style="width:auto" aria-label="Filter by status">
+              <option value="">All statuses</option><option value="pending" selected>Pending</option><option value="verified">Verified</option><option value="rejected">Rejected</option></select>
+            <input type="search" id="pQ" placeholder="Search name, email, Outlier ID or referrer" style="max-width:340px" aria-label="Search payments">
+          </div>
+          <span class="muted small-text" id="pCount"></span>
+        </div>
+        <div id="payTable"></div>
+      </div>`;
+    const filtered = () => {
+      const st = $("#pStatus").value, q = $("#pQ").value.trim().toLowerCase();
+      return P.filter(p => (!st || p.status === st) &&
+        (!q || [p.name, p.email, p.outlier_id, p.referred_by].some(v => String(v || "").toLowerCase().includes(q))));
+    };
+    const draw = () => {
+      const list = filtered();
+      $("#pCount").textContent = `${list.length} shown, ${inr(sum(list, p => Number(p.amount_sent)))} sent`;
+      $("#payTable").innerHTML = list.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Submitted</th><th>Person</th><th class="hide-sm">Outlier ID</th><th class="hide-sm">Referred by</th>
+          <th class="num">Earned</th><th class="num">Sent</th><th>Status</th></tr></thead>
+        <tbody>${list.map(p => `<tr class="clickable" tabindex="0" data-href="payment/${p.id}">
+          <td class="muted">${esc(fmtDate(p.created_at))}</td>
+          <td><div class="cell-title">${esc(p.name)}</div><div class="cell-sub">${esc(p.email)}</div></td>
+          <td class="hide-sm">${esc(p.outlier_id)}</td>
+          <td class="hide-sm muted">${esc(p.referred_by || "–")}</td>
+          <td class="num">${inr(p.amount_earned)}</td><td class="num">${inr(p.amount_sent)}</td>
+          <td>${payTag(p.status)}</td></tr>`).join("")}</tbody></table></div>`
+        : emptyState(P.length ? "Nothing matches" : "No payments yet", P.length ? "Try another status or search." : "Submissions from the app appear here.");
+      wireCommon();
+    };
+    $("#pStatus").onchange = draw;
+    $("#pQ").oninput = draw;
+    $('[data-act="payCsv"]').onclick = () => {
+      const rows = [["submitted", "name", "email", "outlier_id", "referred_by", "amount_earned_inr", "amount_sent_inr", "status", "admin_note", "reviewed_by", "reviewed_at"]]
+        .concat(filtered().map(p => [p.created_at, p.name, p.email, p.outlier_id, p.referred_by || "", p.amount_earned, p.amount_sent, p.status, p.admin_note || "", p.reviewed_by || "", p.reviewed_at || ""]));
+      downloadCsv(rows, `payments-${new Date().toISOString().slice(0, 10)}.csv`);
+    };
+    draw();
+  }
+
+  async function paymentDetail(id) {
+    const p = S.payments.find(x => x.id === id);
+    if (!p) { view.innerHTML = head("Payment not found", "It may have been deleted.", "", backLink("#payments", "Payments")); return; }
+    const others = S.payments.filter(x => x.email === p.email && x.id !== p.id);
+    view.innerHTML = `
+      ${head(`${p.name}`, `${payTag(p.status)}&nbsp; Submitted ${esc(fmtDate(p.created_at))}${p.reviewed_at ? `, reviewed ${esc(fmtDate(p.reviewed_at))} by ${esc(p.reviewed_by || "admin")}` : ""}`,
+        `<button type="button" class="danger" data-act="payDelete">Delete</button>`, backLink("#payments", "Payments"))}
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Screenshots</h2><span class="muted small-text">Tap to open full size</span></div>
+          <div class="panel-body"><div class="proofs" id="proofs">
+            <figure><figcaption>Earnings (payouts)</figcaption><a target="_blank" rel="noopener" id="pfE"><p class="muted small-text" style="padding:16px">Loading…</p></a></figure>
+            <figure><figcaption>Referral</figcaption><a target="_blank" rel="noopener" id="pfR"><p class="muted small-text" style="padding:16px">Loading…</p></a></figure>
+          </div></div>
+        </div>
+        <div>
+          <div class="panel">
+            <div class="panel-head"><h2>Details</h2></div>
+            <div class="panel-body"><dl class="facts">
+              <dt>Name</dt><dd>${esc(p.name)}</dd>
+              <dt>Email</dt><dd><a href="#person/${encodeURIComponent(p.email)}">${esc(p.email)}</a></dd>
+              <dt>Outlier ID</dt><dd>${esc(p.outlier_id)}</dd>
+              <dt>Referred by</dt><dd>${esc(p.referred_by || "–")}</dd>
+              <dt>Amount earned</dt><dd>${inr(p.amount_earned)}</dd>
+              <dt>Amount sent</dt><dd><strong>${inr(p.amount_sent)}</strong></dd>
+              <dt>Other submissions</dt><dd>${others.length ? `${others.length}, ${inr(sum(others, x => Number(x.amount_sent)))} sent in total` : "None"}</dd>
+            </dl></div>
+          </div>
+          <div class="panel section-gap">
+            <div class="panel-head"><h2>Review</h2></div>
+            <div class="panel-body">
+              <label for="payNote" style="margin-top:0">Note to the person (optional)</label>
+              <textarea id="payNote" rows="3" style="min-height:72px" placeholder="e.g. Referral screenshot doesn't match the amount">${esc(p.admin_note || "")}</textarea>
+              <div class="row" style="margin-top:12px">
+                <button type="button" class="primary" data-review="verified">Mark verified</button>
+                <button type="button" class="danger" data-review="rejected">Reject</button>
+                ${p.status !== "pending" ? `<button type="button" class="ghost" data-review="pending">Move back to pending</button>` : ""}
+              </div>
+              <p class="hint">They see the status and your note in the app.</p>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    $$("[data-review]", view).forEach(b => b.onclick = async () => {
+      const status = b.dataset.review;
+      const note = $("#payNote").value.trim() || null;
+      const { error } = await sb.from("payment_submissions").update({
+        status, admin_note: note,
+        reviewed_by: status === "pending" ? null : user.email,
+        reviewed_at: status === "pending" ? null : new Date().toISOString()
+      }).eq("id", p.id);
+      if (error) return toast(error.message);
+      toast(status === "verified" ? "Marked verified" : status === "rejected" ? "Rejected" : "Moved back to pending");
+      const next = S.payments.find(x => x.status === "pending" && x.id !== p.id);
+      await refresh();
+      if (status !== "pending" && next) location.hash = `payment/${next.id}`;
+    });
+    $('[data-act="payDelete"]').onclick = () => confirmDialog({
+      title: `Delete this submission from ${p.name}?`,
+      text: "The submission and both screenshots are removed for good.",
+      confirm: "Delete submission", danger: true,
+      run: async () => {
+        await sb.storage.from("payment-proofs").remove([p.earnings_path, p.referral_path]);
+        const { error } = await sb.from("payment_submissions").delete().eq("id", p.id);
+        if (error) throw error;
+        toast("Submission deleted");
+        location.hash = "payments";
+        await refresh();
+      }
+    });
+
+    // Short-lived links to the private screenshots.
+    const { data } = await sb.storage.from("payment-proofs").createSignedUrls([p.earnings_path, p.referral_path], 600);
+    [["#pfE", 0], ["#pfR", 1]].forEach(([sel, i]) => {
+      const a = $(sel, view); if (!a) return;
+      const url = data?.[i]?.signedUrl;
+      if (url) { a.href = url; a.innerHTML = `<img src="${esc(url)}" alt="${i ? "Referral" : "Earnings"} screenshot">`; }
+      else a.innerHTML = `<p class="muted small-text" style="padding:16px">Screenshot not found.</p>`;
+    });
+  }
+
+  function downloadCsv(rows, filename) {
+    const csv = "\ufeff" + rows.map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
 
   // ---------------------------------------------------------------

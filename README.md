@@ -91,6 +91,14 @@ Setup:
 
 Run `supabase/003_analytics.sql` to switch this on. Reading time is measured by the server between heartbeats sent every 15 seconds, capped at 30 seconds each, so time with the app in the background isn't counted and can't be faked.
 
+## Payment submissions
+
+After signing in, people see two options: **Shared documents** and **Submit a payment**. The payment form takes name, email (filled automatically from Google sign-in), Outlier ID, who invited or referred them, amount earned (₹) and amount sent (₹), plus two screenshots: earnings (payouts) and referral. Screenshots are shrunk on the phone before upload. People see their own submissions and each one's status.
+
+Owners review them under **Payments** in `admin.html`: view both screenshots, mark Verified or Rejected with a note the person sees, filter, search, and download a CSV.
+
+Run `supabase/004_payments.sql` to switch it on. Submissions and screenshots are private: each person can only read their own, and only admins can review. The form also works in a normal browser at `?view=pay`.
+
 ## Using it
 1. Open `…/secure-doc-share/admin.html` and sign in.
 2. Upload a PDF and paste the allowed email IDs, separated by commas or new lines.

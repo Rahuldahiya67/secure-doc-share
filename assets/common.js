@@ -26,6 +26,7 @@
     docs: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
     people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
     activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+    wallet: '<path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1"/><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M16 14h2"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
     lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
     upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
@@ -152,7 +153,11 @@
     const msg = $("#authmsg", target);
     $("#google", target).onclick = async () => {
       const doc = new URLSearchParams(location.search).get("doc");
-      try { if (doc) localStorage.setItem("pendingDoc", doc); } catch (_) {}
+      const view = new URLSearchParams(location.search).get("view");
+      try {
+        if (doc) localStorage.setItem("pendingDoc", doc);
+        if (view) localStorage.setItem("pendingView", view);
+      } catch (_) {}
       const { data, error } = await sb.auth.signInWithOAuth({
         provider: "google",
         options: { redirectTo: `${cfg.appScheme}://auth`, skipBrowserRedirect: true }

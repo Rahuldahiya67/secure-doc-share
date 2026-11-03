@@ -7,6 +7,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -29,7 +31,10 @@ public class MainActivity extends Activity {
     private static final String BASE = "https://" + HOST + PATH_PREFIX;
     private static final String SCHEME = "securedocshare";
 
+    private static final int PICK_FILE = 4201;
+
     private WebView web;
+    private ValueCallback<Uri[]> fileCallback;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -68,6 +73,24 @@ public class MainActivity extends Activity {
             }
         });
 
+        // Photo picker for <input type="file"> (payment screenshots).
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                fileCallback = callback;
+                try {
+                    Intent pick = params.createIntent();
+                    pick.addCategory(Intent.CATEGORY_OPENABLE);
+                    startActivityForResult(pick, PICK_FILE);
+                } catch (Exception e) {
+                    fileCallback = null;
+                    return false;
+                }
+                return true;
+            }
+        });
+
         // "Download latest app" and similar links open in the browser.
         web.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> openExternal(url));
 
@@ -85,6 +108,19 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         web.loadUrl(urlFor(intent));
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == PICK_FILE) {
+            if (fileCallback != null) {
+                fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                fileCallback = null;
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override
@@ -174,6 +210,11 @@ public class MainActivity extends Activity {
     private class Bridge {
         @JavascriptInterface
         public boolean isApp() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean supportsUpload() {
             return true;
         }
 
