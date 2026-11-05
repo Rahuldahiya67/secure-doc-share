@@ -1861,7 +1861,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: a day-by-day summary (how many people paid and who), and a full list of payments with name, email, phone, Outlier ID, amounts, UTR and status. Screenshots never go to the sheet.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: a day-by-day summary (how many people paid and who), and a list of each payment with just the date, name and email.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2245,7 +2245,7 @@
           <li>Two tabs appear, <strong>Payments by day</strong> and <strong>Payments list</strong>, and refresh every hour.</li>
         </ol>
         <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
-        <p class="hint">Keep this script and the sheet private: they show names, emails and phone numbers. If the script leaks, make a new key here and the old one stops working.</p>
+        <p class="hint">Keep this script and the sheet private: they show names and emails. If the script leaks, make a new key here and the old one stops working.</p>
       </div>
       <div class="dlg-foot"><button type="button" data-close>Done</button><button class="primary" type="button" data-act="copyScript">Copy script</button></div>`, async () => {});
     $('[data-act="copyScript"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(script); toast("Script copied"); } catch { $("#shScript").select(); } };
@@ -2294,10 +2294,9 @@ function updatePayments() {
 
   const list = call("payments_list");
   writeTab("Payments list",
-    ["Submitted", "Payout date", "Week ending", "Name", "Email", "Phone", "Outlier ID", "Referred by", "Earned (Rs)", "Paid (Rs)", "Share paid", "Paid via", "UTR", "Status", "Reviewed by"],
-    list.map(r => [toDateTime(r.submitted_at), toDate(r.payout_date), toDate(r.week_ending), r.name, r.email, r.phone ? "'" + r.phone : "", r.outlier_id ? "'" + r.outlier_id : "", r.referred_by || "",
-      Number(r.earned), Number(r.paid), r.percent == null ? "" : Number(r.percent) / 100, r.paid_via || "", r.utr ? "'" + r.utr : "", r.status, r.reviewed_by || ""]),
-    [[1, 1, "d mmm yyyy, h:mm am/pm"], [2, 2, "ddd, d mmm yyyy"], [9, 2, "#,##0.00"], [11, 1, "0.0%"]]);
+    ["Date", "Name", "Email"],
+    list.map(r => [toDateTime(r.submitted_at), r.name, r.email]),
+    [[1, 1, "d mmm yyyy, h:mm am/pm"]]);
 }
 
 function setupHourly() {
