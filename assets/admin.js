@@ -32,7 +32,7 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins, quizRows] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins, quizRows, profiles] = await Promise.all([
       sb.from("documents")
         .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -56,7 +56,8 @@
       sb.from("device_locks").select("*"),
       sb.from("device_requests").select("*").order("created_at", { ascending: false }).limit(300),
       sb.from("admins").select("*").order("email"),
-      sb.from("quizzes").select("*,quiz_questions(*),quiz_attempts(id,email,score,total,passed,answers,created_at)").order("created_at", { ascending: false })
+      sb.from("quizzes").select("*,quiz_questions(*),quiz_attempts(id,email,score,total,passed,answers,created_at)").order("created_at", { ascending: false }),
+      sb.from("candidate_profiles").select("*")
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -81,6 +82,8 @@
     S.role = role.error ? (S.isOwner ? "owner" : "admin") : role.data || "admin";
     S.deviceLocks = locks.data || []; S.deviceRequests = devReqs.data || []; S.admins = admins.data || [];
     S.quizV1 = !quizRows.error;
+    S.profiles = profiles.error ? [] : profiles.data || [];
+    S.profilesV1 = !profiles.error;
     S.quizzes = (quizRows.data || []).map(z => ({ ...z, quiz_attempts: (z.quiz_attempts || []).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) }));
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
@@ -121,6 +124,7 @@
     S.groups.forEach(g => g.group_members.forEach(m => person(m.email)));
     S.requests.forEach(r => person(r.email));
     S.feedback.forEach(f => person(f.email));
+    S.profiles.forEach(p => person(p.email));
     D.alerts = computeAlerts();
     document.body.classList.toggle("readonly", S.role === "viewer");
   }
@@ -602,7 +606,7 @@
       ${peopleTabs("")}${r2Note()}
       <div class="panel">
         <div class="panel-head"><div class="row" style="flex:1">
-          <input type="search" id="q" placeholder="Search name, email or Outlier ID" style="max-width:300px" aria-label="Search people">
+          <input type="search" id="q" placeholder="Search name, email, phone or Outlier ID" style="max-width:300px" aria-label="Search people">
           <select id="fTag" style="width:auto" aria-label="Filter by tag"><option value="">All tags</option>${allTags.map(t => `<option>${esc(t)}</option>`).join("")}</select>
           <select id="fGroup" style="width:auto" aria-label="Filter by group"><option value="">All groups</option>${S.groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}</select>
           <label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="onlyUnopened"> Haven't opened anything</label>
@@ -612,7 +616,7 @@
     const draw = () => {
       const q = $("#q").value.trim().toLowerCase(), tag = $("#fTag").value, grp = $("#fGroup").value, onlyUn = $("#onlyUnopened").checked;
       const list = [...D.people.keys()].map(email => personSummary(email))
-        .filter(r => (!q || [r.email, r.name, r.outlierId].some(v => String(v || "").toLowerCase().includes(q)))
+        .filter(r => (!q || [r.email, r.name, r.outlierId, r.phone].some(v => String(v || "").toLowerCase().includes(q)))
           && (!tag || r.tags.includes(tag)) && (!grp || r.groups.some(g => g.id === grp)) && (!onlyUn || !r.sessions.length))
         .sort((a, b) => (b.live - a.live) || ((b.lastActive ? new Date(b.lastActive) : 0) - (a.lastActive ? new Date(a.lastActive) : 0)) || a.email.localeCompare(b.email));
       $("#pplCount").textContent = `${list.length} ${list.length === 1 ? "person" : "people"}`;
@@ -641,11 +645,13 @@
     const row = S.peopleRows.find(x => x.email === email) || null;
     const pays = S.payments.filter(x => x.email === email);
     const sessions = D.sessByEmail.get(email) || [];
-    const name = row?.display_name || pays[0]?.name || S.requests.find(x => x.email === email)?.name || "";
+    const prof = S.profiles.find(x => x.email === email) || null;
+    const name = row?.display_name || prof?.full_name || pays[0]?.name || S.requests.find(x => x.email === email)?.name || "";
     const lastActive = [sessions[0]?.last_seen_at, pays[0]?.created_at].filter(Boolean).sort().pop();
     return {
-      email, row, name, tags: row?.tags || [], notes: row?.notes || "", outlierId: pays[0]?.outlier_id || "",
-      referrer: referrerOf(email), referredText: pays.find(x => x.referred_by)?.referred_by || "",
+      email, row, name, tags: row?.tags || [], notes: row?.notes || "", outlierId: prof?.outlier_id || pays[0]?.outlier_id || "",
+      phone: prof?.phone || "", profile: prof,
+      referrer: referrerOf(email), referredText: prof?.referred_by || pays.find(x => x.referred_by)?.referred_by || "",
       groups: S.groups.filter(g => g.group_members.some(m => m.email === email)),
       docs: p.docs, opened: p.opened, sessions, secs: sum(sessions, s => s.seconds), live: sessions.some(isLive),
       pays, paid: sum(pays.filter(x => x.status !== "rejected"), x => Number(x.amount_sent)),
@@ -657,7 +663,7 @@
   function referrerOf(email) {
     const row = S.peopleRows.find(x => x.email === email);
     if (row?.referred_by_email) return row.referred_by_email;
-    const text = (S.payments.find(x => x.email === email && x.referred_by)?.referred_by || "").trim().toLowerCase();
+    const text = (S.profiles.find(x => x.email === email)?.referred_by || S.payments.find(x => x.email === email && x.referred_by)?.referred_by || "").trim().toLowerCase();
     if (!text) return null;
     if (text.includes("@")) return D.people.has(text) && text !== email ? text : null;
     for (const e of D.people.keys()) {
@@ -667,7 +673,7 @@
     }
     return null;
   }
-  const nameOf = email => S.peopleRows.find(x => x.email === email)?.display_name || S.payments.find(x => x.email === email)?.name || email;
+  const nameOf = email => S.peopleRows.find(x => x.email === email)?.display_name || S.profiles.find(x => x.email === email)?.full_name || S.payments.find(x => x.email === email)?.name || email;
 
   function personDetail(emailArg) {
     const email = decodeURIComponent(emailArg || "");
@@ -680,7 +686,7 @@
     const others = [...D.people.keys()].filter(e => e !== email).sort();
 
     view.innerHTML = `
-      ${head(r.name || email, `${blocked ? `<span class="tag off">Blocked</span>&nbsp; ` : ""}${esc(email)}${r.outlierId ? `, Outlier ID ${esc(r.outlierId)}` : ""}`,
+      ${head(r.name || email, `${blocked ? `<span class="tag off">Blocked</span>&nbsp; ` : ""}${esc(email)}${r.phone ? `, ${esc(r.phone)}` : ""}${r.outlierId ? `, Outlier ID ${esc(r.outlierId)}` : ""}${r.profile ? "" : S.profiles.length || S.profilesV1 ? ` <span class="tag warn">Profile not filled</span>` : ""}`,
         `${blocked ? `<button type="button" data-act="unblock">Unblock</button>` : `<button type="button" class="danger" data-act="block">Block</button>`}
          ${r.pays.length ? `<a class="btn" href="#statement/${encodeURIComponent(email)}">Monthly statement</a>` : ""}
          ${directDocs.size ? `<button type="button" data-act="removeAll">Remove from all documents</button>` : ""}`,
@@ -1855,7 +1861,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour with a day-by-day summary: how many people paid, submissions, earned, paid, verified, pending and rejected. Only totals go to the sheet: no names, emails, UTRs or screenshots.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: a day-by-day summary (how many people paid and who), and a full list of payments with name, email, phone, Outlier ID, amounts, UTR and status. Screenshots never go to the sheet.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2236,10 +2242,10 @@
           <li>Open your Google Sheet (or make a new one), then <strong>Extensions → Apps Script</strong>.</li>
           <li>Delete what's there, paste the script below, and click <strong>Save</strong>.</li>
           <li>At the top, pick <strong>setupHourly</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
-          <li>A tab called <strong>Payments by day</strong> appears and refreshes every hour.</li>
+          <li>Two tabs appear, <strong>Payments by day</strong> and <strong>Payments list</strong>, and refresh every hour.</li>
         </ol>
         <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
-        <p class="hint">Keep this script private. Anyone with the key can see the daily totals (never names or screenshots). If it leaks, make a new key here.</p>
+        <p class="hint">Keep this script and the sheet private: they show names, emails and phone numbers. If the script leaks, make a new key here and the old one stops working.</p>
       </div>
       <div class="dlg-foot"><button type="button" data-close>Done</button><button class="primary" type="button" data-act="copyScript">Copy script</button></div>`, async () => {});
     $('[data-act="copyScript"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(script); toast("Script copied"); } catch { $("#shScript").select(); } };
@@ -2248,37 +2254,50 @@
   function sheetScript(token) {
     return `// Pro AI Trainers: payments by day. Paste into Extensions -> Apps Script.
 // Run setupHourly once; after that the sheet updates itself every hour.
-const API = ${JSON.stringify(cfg.supabaseUrl + "/rest/v1/rpc/payments_by_day")};
+const API = ${JSON.stringify(cfg.supabaseUrl + "/rest/v1/rpc/")};
 const ANON_KEY = ${JSON.stringify(cfg.supabaseAnonKey)};
 const SHEET_KEY = ${JSON.stringify(token)};
-const TAB = "Payments by day";
 
-function updatePayments() {
-  const res = UrlFetchApp.fetch(API, {
+function call(fn) {
+  const res = UrlFetchApp.fetch(API + fn, {
     method: "post", contentType: "application/json", muteHttpExceptions: true,
     headers: { apikey: ANON_KEY, Authorization: "Bearer " + ANON_KEY },
     payload: JSON.stringify({ token: SHEET_KEY, days: 365 })
   });
   if (res.getResponseCode() !== 200) throw new Error("Couldn't get payments: " + res.getContentText());
-  const rows = JSON.parse(res.getContentText());
+  return JSON.parse(res.getContentText());
+}
+function toDate(s) { if (!s) return ""; const p = String(s).slice(0, 10).split("-"); return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); }
+function toDateTime(s) { if (!s) return ""; const m = String(s).match(/(\\d+)-(\\d+)-(\\d+)[T ](\\d+):(\\d+)/); return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : s; }
+function writeTab(name, head, data, formats) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheetByName(TAB) || ss.insertSheet(TAB);
-  const head = ["Date", "Week ending (due day)", "People who paid", "Submissions", "Earned (Rs)", "Paid (Rs)", "Share paid", "Verified", "Pending", "Rejected"];
-  const toDate = s => { const p = s.split("-"); return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); };
-  const data = rows.map(r => [toDate(r.day), toDate(r.week_ending), r.people, r.submissions, Number(r.earned), Number(r.paid),
-    Number(r.earned) ? Number(r.paid) / Number(r.earned) : "", r.verified, r.pending, r.rejected]);
+  const sh = ss.getSheetByName(name) || ss.insertSheet(name);
   sh.clearContents();
   sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight("bold");
   if (data.length) {
     sh.getRange(2, 1, data.length, head.length).setValues(data);
-    sh.getRange(2, 1, data.length, 2).setNumberFormat("ddd, d mmm yyyy");
-    sh.getRange(2, 5, data.length, 2).setNumberFormat("#,##0.00");
-    sh.getRange(2, 7, data.length, 1).setNumberFormat("0.0%");
+    formats.forEach(f => sh.getRange(2, f[0], data.length, f[1]).setNumberFormat(f[2]));
   }
   sh.getRange(1, head.length + 2).setValue("Last updated");
   sh.getRange(2, head.length + 2).setValue(new Date()).setNumberFormat("d mmm yyyy, h:mm am/pm");
   sh.setFrozenRows(1);
   sh.autoResizeColumns(1, head.length + 2);
+}
+
+function updatePayments() {
+  const days = call("payments_by_day");
+  writeTab("Payments by day",
+    ["Date", "Week ending (due day)", "People who paid", "Submissions", "Earned (Rs)", "Paid (Rs)", "Share paid", "Verified", "Pending", "Rejected", "Who paid"],
+    days.map(r => [toDate(r.day), toDate(r.week_ending), r.people, r.submissions, Number(r.earned), Number(r.paid),
+      Number(r.earned) ? Number(r.paid) / Number(r.earned) : "", r.verified, r.pending, r.rejected, r.who_paid || ""]),
+    [[1, 2, "ddd, d mmm yyyy"], [5, 2, "#,##0.00"], [7, 1, "0.0%"]]);
+
+  const list = call("payments_list");
+  writeTab("Payments list",
+    ["Submitted", "Payout date", "Week ending", "Name", "Email", "Phone", "Outlier ID", "Referred by", "Earned (Rs)", "Paid (Rs)", "Share paid", "Paid via", "UTR", "Status", "Reviewed by"],
+    list.map(r => [toDateTime(r.submitted_at), toDate(r.payout_date), toDate(r.week_ending), r.name, r.email, r.phone ? "'" + r.phone : "", r.outlier_id ? "'" + r.outlier_id : "", r.referred_by || "",
+      Number(r.earned), Number(r.paid), r.percent == null ? "" : Number(r.percent) / 100, r.paid_via || "", r.utr ? "'" + r.utr : "", r.status, r.reviewed_by || ""]),
+    [[1, 1, "d mmm yyyy, h:mm am/pm"], [2, 2, "ddd, d mmm yyyy"], [9, 2, "#,##0.00"], [11, 1, "0.0%"]]);
 }
 
 function setupHourly() {

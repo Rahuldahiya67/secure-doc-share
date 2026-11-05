@@ -63,6 +63,7 @@
         <p class="sub" style="margin:6px 0 0">What would you like to do?</p></div>
       ${anns?.length ? `<section class="ann-list" aria-label="Announcements">${anns.map(a => `<div class="ann${a.pinned ? " pinned" : ""}">
         <div class="t">${esc(a.title)}</div>${a.body ? `<p class="b">${linkify(a.body)}</p>` : ""}<div class="w">${esc(timeAgo(a.created_at))}</div></div>`).join("")}</section>` : ""}
+      <div id="profileNudge"></div>
       <div class="home-tiles">
         <a class="tile" href="?view=docs">
           <span class="tile-icon">${icon("docs")}</span>
@@ -79,6 +80,10 @@
         ${tile("?view=help", "help", "Help", "Answers to common questions.")}
         ${tile("?view=feedback", "chat", "Send feedback", "Ideas, problems or questions for the owner.")}
       </div>`;
+    getProfile().then(pr => {
+      const el = $("#profileNudge"); if (!el || pr === undefined || pr) return;
+      el.innerHTML = `<a class="due" href="?view=me#profile" style="text-decoration:none">${icon("user")}<span><strong>Complete your profile.</strong> Add your name, phone and Outlier ID once, and your payment form fills itself in every time.</span></a>`;
+    });
     sb.rpc("list_quizzes").then(({ data }) => {
       const el = $("#quizTile"); if (!el || !data?.length) return;
       const todo = data.filter(q => !q.passed && !(q.one_attempt && q.attempts)).length;
@@ -190,9 +195,47 @@
         : `<div class="empty"><strong>You're all caught up</strong>New documents, announcements and replies show up here.</div>`}</div>`;
   }
 
+  // Own profile: null when not filled in yet, undefined when profiles aren't switched on.
+  async function getProfile() {
+    const { data, error } = await sb.from("candidate_profiles").select("*").maybeSingle();
+    if (error) return undefined;
+    return data || null;
+  }
+  function profileForm(user, pr) {
+    const meta = user.user_metadata || {};
+    return `<form id="profileForm" class="profile-form">
+      <div class="form-grid">
+        <div><label for="prfName" style="margin-top:0">Full name</label><input id="prfName" type="text" required maxlength="120" autocomplete="name" value="${esc(pr?.full_name || meta.full_name || meta.name || "")}"></div>
+        <div><label for="prfPhone" style="margin-top:0">Phone number</label><input id="prfPhone" type="tel" required maxlength="18" inputmode="tel" autocomplete="tel" placeholder="e.g. 98765 43210" value="${esc(pr?.phone || "")}"></div>
+        <div><label for="prfEmail">Email</label><input id="prfEmail" type="email" value="${esc(user.email)}" readonly></div>
+        <div><label for="prfOutlier">Outlier ID</label><input id="prfOutlier" type="text" required maxlength="120" autocomplete="off" value="${esc(pr?.outlier_id || "")}"></div>
+        <div><label for="prfRef">Referred / invited by</label><input id="prfRef" type="text" maxlength="120" autocomplete="off" placeholder="Name or email of who invited you" value="${esc(pr?.referred_by || "")}"></div>
+      </div>
+      <button class="primary full" type="submit" style="margin-top:14px">${pr ? "Save changes" : "Save profile"}</button>
+      <p class="msg" id="prfMsg" role="status"></p>
+    </form>`;
+  }
+  function wireProfileForm(user, pr, onSaved) {
+    $("#profileForm").onsubmit = async e => {
+      e.preventDefault();
+      const m = $("#prfMsg"), btn = $("#profileForm button[type=submit]");
+      const phone = $("#prfPhone").value.trim();
+      if (!/^\+?[0-9][0-9 -]{8,16}[0-9]$/.test(phone)) { m.className = "msg err"; m.textContent = "Enter a valid phone number, like 98765 43210."; return; }
+      btn.disabled = true;
+      const row = { full_name: $("#prfName").value.trim(), phone, outlier_id: $("#prfOutlier").value.trim(), referred_by: $("#prfRef").value.trim() || null, updated_at: new Date().toISOString() };
+      const { error } = pr ? await sb.from("candidate_profiles").update(row).eq("user_id", user.id) : await sb.from("candidate_profiles").insert(row);
+      btn.disabled = false;
+      if (error) { m.className = "msg err"; m.textContent = "Couldn't save. Please check the details and try again."; return; }
+      m.className = "msg ok"; m.textContent = "Saved. Your payment form will fill this in for you.";
+      window.App.toast?.("Profile saved");
+      onSaved?.();
+    };
+  }
+
   // ---------------------------------------------------------------
   async function myAccount(user) {
     root.innerHTML = `${backLinkHome()}<div class="card"><p class="muted">Loading…</p></div>`;
+    const profile = await getProfile();
     const [docs, sess, pays, reqs] = await Promise.all([
       sb.from("documents").select("id,title"),
       sb.from("view_sessions").select("document_id,seconds,max_page,page_count,last_seen_at").order("last_seen_at", { ascending: false }).limit(500),
@@ -216,6 +259,9 @@
           <div><span>Paid</span><strong>${rupees(counted.reduce((t, p) => t + Number(p.amount_sent), 0))}</strong></div>
         </div>
         ${req?.status === "pending" ? `<div class="notice" style="margin-bottom:12px">Your access request from ${esc(timeAgo(req.created_at))} is waiting for review.</div>` : ""}
+        ${profile !== undefined ? `<h3 class="folder-head" id="profile">${profile ? "Your profile" : "Complete your profile"}</h3>
+          ${profile ? "" : `<p class="small-text" style="margin:0 0 4px">Fill this in once. Every time you submit a payment, these details are filled in for you.</p>`}
+          ${profileForm(user, profile)}` : ""}
         <h3 class="folder-head">Your documents</h3>
         ${D.length ? `<ul class="doc-list">${D.map(d => { const r = byDoc.get(d.id); return `<li><a href="?doc=${encodeURIComponent(d.id)}">
           <span class="doc-icon">${icon("file")}</span><span class="grow"><span class="t">${esc(d.title)}</span>
@@ -227,6 +273,8 @@
           <span class="spacer"></span><button type="button" class="ghost" id="meOut">Sign out</button></div>
       </div>`;
     $("#meOut").onclick = () => window.App.signOut();
+    if (profile !== undefined) wireProfileForm(user, profile, () => myAccount(user));
+    if (location.hash === "#profile") $("#profile")?.scrollIntoView({ block: "start" });
   }
 
   // ---------------------------------------------------------------

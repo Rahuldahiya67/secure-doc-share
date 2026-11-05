@@ -100,7 +100,7 @@
     $("#pOutlier").addEventListener("input", () => drawPayTo());
     $("#payForm").onsubmit = e => submit(e, user);
     await loadAccounts();
-    loadMine(user); drawDue(user);
+    loadMine(user); drawDue(user); prefillFromProfile();
   }
 
   // ---------- step 2: live percentage ----------
@@ -353,6 +353,20 @@
         <div class="s">${p.payout_date ? `Payout ${esc(new Date(p.payout_date).toLocaleDateString(undefined, { day: "numeric", month: "short" }))}, ` : ""}submitted ${esc(fmtDate(p.created_at))}${p.utr ? `, UTR ${esc(p.utr)}` : ""}${p.admin_note ? `<br>Note: ${esc(p.admin_note)}` : ""}</div></div>
         <span class="tag ${st.cls}">${st.text}</span></li>`;
     }).join("")}</ul>`;
+  }
+
+  // Fill name, Outlier ID and referrer from the person's saved profile.
+  async function prefillFromProfile() {
+    const { data: pr, error } = await sb.from("candidate_profiles").select("full_name,outlier_id,referred_by").maybeSingle();
+    if (error) return;
+    if (!pr) {
+      $("#pName")?.closest("div")?.parentElement?.insertAdjacentHTML("beforebegin", `<p class="hint" id="prfHint" style="margin:0 0 10px"><a href="?view=me#profile">Complete your profile</a> and these details fill themselves in every time.</p>`);
+      return;
+    }
+    const set = (id, v) => { const el = $(id); if (el && v && !el.value.trim()) el.value = v; };
+    const nm = $("#pName"); if (nm && pr.full_name) nm.value = pr.full_name;
+    set("#pOutlier", pr.outlier_id); set("#pRef", pr.referred_by);
+    $("#pName")?.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   // This week's payment: when it's due and whether it's been sent.
