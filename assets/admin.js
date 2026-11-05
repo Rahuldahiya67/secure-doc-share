@@ -87,6 +87,7 @@
     const pd = (settings.data || []).find(s => s.key === "payment_day");
     S.payDay = pd && Number(pd.value) >= 0 && Number(pd.value) <= 6 ? Number(pd.value) : 3; // Wednesday
     S.deviceLock = (settings.data || []).find(s => s.key === "device_lock")?.value === true;
+    S.sheetKey = (settings.data || []).find(s => s.key === "sheet_token")?.value || null;
     if (S.accounts.some(x => x.qr_path)) {
       const { data: urls } = await sb.storage.from("payment-qr").createSignedUrls(S.accounts.filter(x => x.qr_path).map(x => x.qr_path), 3600);
       (urls || []).forEach(u => { const x = S.accounts.find(y => y.qr_path === u.path); if (x) x.qrUrl = u.signedUrl; });
@@ -1850,6 +1851,14 @@
           ${owner ? `<button type="button" data-act="savePayDay">Save</button>` : ""}
         </div>
         <p class="hint" style="padding:0 18px 14px;margin:0">People see the due date in the app, and the Missing tab and weekly chart use weeks that end on this day.</p>
+      </div>
+      <div class="panel section-gap">
+        <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
+        <div class="panel-body">
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour with a day-by-day summary: how many people paid, submissions, earned, paid, verified, pending and rejected. Only totals go to the sheet: no names, emails, UTRs or screenshots.</p>
+          ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
+            ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
+        </div>
       </div>`;
 
     const list = $("#acctList");
@@ -1883,6 +1892,13 @@
           toast("Account deleted"); await refresh();
         } });
     });
+    const sk = $('[data-act="sheetKey"]');
+    if (sk) sk.onclick = () => S.sheetKey
+      ? confirmDialog({ title: "Make a new key?", text: "The script in your current sheet stops working until you paste the new script into it.", confirm: "Make new key", run: async () => { dlg.close(); await sheetSetup(); } })
+      : sheetSetup();
+    const so = $('[data-act="sheetOff"]');
+    if (so) so.onclick = () => confirmDialog({ title: "Disconnect the Google Sheet?", text: "The sheet keeps what it already has but stops updating.", confirm: "Disconnect", danger: true,
+      run: async () => { const { error } = await sb.from("app_settings").delete().eq("key", "sheet_token"); if (error) throw error; toast("Sheet disconnected"); await refresh(); } });
     const saveDay = $('[data-act="savePayDay"]');
     if (saveDay) saveDay.onclick = async () => {
       const v = Number($("#payDay").value);
@@ -2203,6 +2219,76 @@
       await refresh();
     };
     input.click();
+  }
+
+  // Google Sheet: make a secret key, keep only its fingerprint, and hand over a ready script.
+  async function sheetSetup() {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+    const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)))].map(b => b.toString(16).padStart(2, "0")).join("");
+    const { error } = await sb.from("app_settings").upsert({ key: "sheet_token", value: { hash, created_at: new Date().toISOString() }, updated_at: new Date().toISOString() });
+    if (error) return toast(/payments_by_day|does not exist/.test(error.message) ? "Run supabase/011_sheet_export.sql first." : error.message);
+    const script = sheetScript(token);
+    openDialog(`
+      <div class="dlg-head"><h2>Connect your Google Sheet</h2><p class="sub" style="margin:6px 0 0">This key is shown only once. Copy the script now.</p></div>
+      <div class="dlg-body">
+        <ol class="steps-list">
+          <li>Open your Google Sheet (or make a new one), then <strong>Extensions → Apps Script</strong>.</li>
+          <li>Delete what's there, paste the script below, and click <strong>Save</strong>.</li>
+          <li>At the top, pick <strong>setupHourly</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
+          <li>A tab called <strong>Payments by day</strong> appears and refreshes every hour.</li>
+        </ol>
+        <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
+        <p class="hint">Keep this script private. Anyone with the key can see the daily totals (never names or screenshots). If it leaks, make a new key here.</p>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Done</button><button class="primary" type="button" data-act="copyScript">Copy script</button></div>`, async () => {});
+    $('[data-act="copyScript"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(script); toast("Script copied"); } catch { $("#shScript").select(); } };
+    dlg.addEventListener("close", () => refresh(), { once: true });
+  }
+  function sheetScript(token) {
+    return `// Pro AI Trainers: payments by day. Paste into Extensions -> Apps Script.
+// Run setupHourly once; after that the sheet updates itself every hour.
+const API = ${JSON.stringify(cfg.supabaseUrl + "/rest/v1/rpc/payments_by_day")};
+const ANON_KEY = ${JSON.stringify(cfg.supabaseAnonKey)};
+const SHEET_KEY = ${JSON.stringify(token)};
+const TAB = "Payments by day";
+
+function updatePayments() {
+  const res = UrlFetchApp.fetch(API, {
+    method: "post", contentType: "application/json", muteHttpExceptions: true,
+    headers: { apikey: ANON_KEY, Authorization: "Bearer " + ANON_KEY },
+    payload: JSON.stringify({ token: SHEET_KEY, days: 365 })
+  });
+  if (res.getResponseCode() !== 200) throw new Error("Couldn't get payments: " + res.getContentText());
+  const rows = JSON.parse(res.getContentText());
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(TAB) || ss.insertSheet(TAB);
+  const head = ["Date", "Week ending (due day)", "People who paid", "Submissions", "Earned (Rs)", "Paid (Rs)", "Share paid", "Verified", "Pending", "Rejected"];
+  const toDate = s => { const p = s.split("-"); return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); };
+  const data = rows.map(r => [toDate(r.day), toDate(r.week_ending), r.people, r.submissions, Number(r.earned), Number(r.paid),
+    Number(r.earned) ? Number(r.paid) / Number(r.earned) : "", r.verified, r.pending, r.rejected]);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight("bold");
+  if (data.length) {
+    sh.getRange(2, 1, data.length, head.length).setValues(data);
+    sh.getRange(2, 1, data.length, 2).setNumberFormat("ddd, d mmm yyyy");
+    sh.getRange(2, 5, data.length, 2).setNumberFormat("#,##0.00");
+    sh.getRange(2, 7, data.length, 1).setNumberFormat("0.0%");
+  }
+  sh.getRange(1, head.length + 2).setValue("Last updated");
+  sh.getRange(2, head.length + 2).setValue(new Date()).setNumberFormat("d mmm yyyy, h:mm am/pm");
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, head.length + 2);
+}
+
+function setupHourly() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === "updatePayments")
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger("updatePayments").timeBased().everyHours(1).create();
+  updatePayments();
+}
+`;
   }
 
   function remindDialog(d, behind, pageCount) {

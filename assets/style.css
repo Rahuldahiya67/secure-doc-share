@@ -562,3 +562,4 @@ body.readonly .main [data-group], body.readonly .main #payDay, body.readonly .ma
 .notif-list .ic { flex: none; width: 34px; height: 34px; border-radius: 9px; background: var(--seal-soft); color: var(--seal); display: flex; align-items: center; justify-content: center; }
 .notif-list .ic svg { width: 18px; height: 18px; }
 .notif-list .s { color: var(--muted); font-size: 13px; }
+.steps-list { margin: 4px 0 12px; padding-left: 20px; display: grid; gap: 6px; font-size: 14px; }
