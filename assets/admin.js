@@ -599,25 +599,38 @@
     (pages[tab] || peopleList)();
   }
 
+  // Candidates whose app profile (name, phone, Outlier ID) isn't saved yet. Admins and blocked people don't count.
+  const adminEmails = () => new Set([user.email, ...S.admins.map(a => a.email)]);
+  const noProfile = () => S.profilesV1 ? [...D.people.keys()].filter(e => !adminEmails().has(e) && !D.blocked.has(e) && !S.profiles.some(p => p.email === e)).sort() : [];
+
   function peopleList() {
     const allTags = [...new Set(S.peopleRows.flatMap(p => p.tags || []))].sort();
+    const missing = noProfile();
+    const total = [...D.people.keys()].filter(e => !adminEmails().has(e) && !D.blocked.has(e)).length;
     view.innerHTML = `
       ${head("People", "Everyone you've shared with, paid by, or who asked for access.")}
       ${peopleTabs("")}${r2Note()}
+      ${S.profilesV1 ? `<div class="panel" style="margin-bottom:16px"><div class="panel-body row" style="justify-content:space-between">
+        <div><strong>${missing.length ? `${missing.length} of ${total} haven't completed their profile` : "Everyone has completed their profile"}</strong>
+          <p class="hint" style="margin:4px 0 0">Profile = name, phone and Outlier ID saved under My account in the app. ${total - missing.length} done.</p></div>
+        ${missing.length ? `<div class="row"><button type="button" data-act="showMissing">Show them</button><button type="button" class="primary" data-act="remindProfile">Remind them</button></div>` : ""}
+      </div></div>` : ""}
       <div class="panel">
         <div class="panel-head"><div class="row" style="flex:1">
           <input type="search" id="q" placeholder="Search name, email, phone or Outlier ID" style="max-width:300px" aria-label="Search people">
           <select id="fTag" style="width:auto" aria-label="Filter by tag"><option value="">All tags</option>${allTags.map(t => `<option>${esc(t)}</option>`).join("")}</select>
           <select id="fGroup" style="width:auto" aria-label="Filter by group"><option value="">All groups</option>${S.groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}</select>
           <label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="onlyUnopened"> Haven't opened anything</label>
+          ${S.profilesV1 ? `<label class="row small-text" style="margin:0;gap:6px;font-weight:400"><input type="checkbox" id="onlyNoProfile"> Profile not filled</label>` : ""}
         </div><span class="muted small-text" id="pplCount"></span></div>
         <div id="peopleTable"></div>
       </div>`;
     const draw = () => {
       const q = $("#q").value.trim().toLowerCase(), tag = $("#fTag").value, grp = $("#fGroup").value, onlyUn = $("#onlyUnopened").checked;
+      const onlyNp = $("#onlyNoProfile")?.checked, miss = new Set(missing);
       const list = [...D.people.keys()].map(email => personSummary(email))
         .filter(r => (!q || [r.email, r.name, r.outlierId, r.phone].some(v => String(v || "").toLowerCase().includes(q)))
-          && (!tag || r.tags.includes(tag)) && (!grp || r.groups.some(g => g.id === grp)) && (!onlyUn || !r.sessions.length))
+          && (!tag || r.tags.includes(tag)) && (!grp || r.groups.some(g => g.id === grp)) && (!onlyUn || !r.sessions.length) && (!onlyNp || miss.has(r.email)))
         .sort((a, b) => (b.live - a.live) || ((b.lastActive ? new Date(b.lastActive) : 0) - (a.lastActive ? new Date(a.lastActive) : 0)) || a.email.localeCompare(b.email));
       $("#pplCount").textContent = `${list.length} ${list.length === 1 ? "person" : "people"}`;
       $("#peopleTable").innerHTML = list.length ? `<div class="table-wrap"><table class="data">
@@ -625,7 +638,7 @@
         <tbody>${list.map(r => `<tr class="clickable" tabindex="0" data-href="person/${encodeURIComponent(r.email)}">
           <td><div class="row" style="gap:10px;flex-wrap:nowrap"><span class="avatar">${esc(initials(r.name || r.email))}</span>
             <div><div class="cell-title">${esc(r.name || r.email)}</div>${r.name ? `<div class="cell-sub">${esc(r.email)}</div>` : ""}
-            ${r.tags.length || r.groups.length ? `<div class="flags">${tagChips(r.tags)} ${r.groups.map(g => `<span class="tag live">${esc(g.name)}</span>`).join(" ")}</div>` : ""}</div></div></td>
+            ${r.tags.length || r.groups.length || miss.has(r.email) ? `<div class="flags">${miss.has(r.email) ? `<span class="tag warn">Profile not filled</span> ` : ""}${tagChips(r.tags)} ${r.groups.map(g => `<span class="tag live">${esc(g.name)}</span>`).join(" ")}</div>` : ""}</div></div></td>
           <td>${D.blocked.has(r.email) ? `<span class="tag off">Blocked</span>` : r.live ? `<span class="tag now">Reading now</span>` : r.sessions.length ? `<span class="tag live">Active</span>` : r.docs.size ? `<span class="tag warn">Not opened</span>` : `<span class="tag plain">No documents</span>`}</td>
           <td class="num">${r.opened.size} of ${r.docs.size}</td>
           <td class="num">${r.secs ? fmtDuration(r.secs) : "–"}</td>
@@ -634,9 +647,34 @@
         : emptyState(D.people.size ? "No matches" : "No people yet", D.people.size ? "Try a different search or filter." : "People appear here once you share a document with them.");
       wireCommon();
     };
-    ["fTag", "fGroup", "onlyUnopened"].forEach(id => $(`#${id}`).onchange = draw);
+    ["fTag", "fGroup", "onlyUnopened", "onlyNoProfile"].forEach(id => { const el = $(`#${id}`); if (el) el.onchange = draw; });
     $("#q").oninput = draw;
+    const sm = $('[data-act="showMissing"]');
+    if (sm) sm.onclick = () => { $("#onlyNoProfile").checked = true; draw(); $("#peopleTable").scrollIntoView({ behavior: "smooth", block: "start" }); };
+    const rp = $('[data-act="remindProfile"]');
+    if (rp) rp.onclick = () => profileReminder(missing);
     draw();
+  }
+
+  function profileReminder(emails) {
+    const text = `Hi, please complete your profile in the Pro AI Trainers app: open the app, tap My account, and fill in your name, phone number, Outlier ID and who invited you. It takes a minute, and your payment form will fill itself in after that.\n\nApp link: ${location.origin}${location.pathname.replace(/admin\.html$/, "")}`;
+    openDialog(`
+      <div class="dlg-head"><h2>Remind ${emails.length} ${emails.length === 1 ? "person" : "people"}</h2><p class="sub" style="margin:6px 0 0">Copy the message, or open your email with everyone in BCC. Nothing is sent until you send it.</p></div>
+      <div class="dlg-body">
+        <label style="margin-top:4px">Profile not filled</label>
+        <ul class="plain-list">${emails.map(e => `<li>${esc(nameOf(e))}${nameOf(e) !== e ? ` <span class="muted small-text">${esc(e)}</span>` : ""}</li>`).join("")}</ul>
+        <label for="pfText">Message</label><textarea id="pfText" rows="6">${esc(text)}</textarea>
+      </div>
+      <div class="dlg-foot"><button type="button" data-close>Close</button>
+        <button type="button" data-pf="csv">Download list</button>
+        <button type="button" data-pf="mail">Email them</button>
+        <button type="button" data-pf="wa">WhatsApp</button>
+        <button class="primary" type="button" data-pf="copy">Copy message</button></div>`, async () => {});
+    const msg = () => $("#pfText").value;
+    $('[data-pf="copy"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(msg()); toast("Message copied"); } catch { $("#pfText").select(); } };
+    $('[data-pf="wa"]', dlg).onclick = () => window.open(`https://wa.me/?text=${encodeURIComponent(msg())}`, "_blank", "noopener");
+    $('[data-pf="mail"]', dlg).onclick = () => { location.href = `mailto:?bcc=${encodeURIComponent(emails.join(","))}&subject=${encodeURIComponent("Please complete your Pro AI Trainers profile")}&body=${encodeURIComponent(msg())}`; };
+    $('[data-pf="csv"]', dlg).onclick = () => downloadCsv([["Name", "Email"], ...emails.map(e => [nameOf(e) === e ? "" : nameOf(e), e])], "profile-not-filled.csv");
   }
 
   // Everything known about one person, from every table.
