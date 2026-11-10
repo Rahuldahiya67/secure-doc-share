@@ -1899,7 +1899,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: a day-by-day summary (how many people paid and who), and a list of each payment with just the date, name and email.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab listing every payment: date, name, email and amount paid.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2280,7 +2280,7 @@
           <li>Open your Google Sheet (or make a new one), then <strong>Extensions → Apps Script</strong>.</li>
           <li>Delete what's there, paste the script below, and click <strong>Save</strong>.</li>
           <li>At the top, pick <strong>setupHourly</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
-          <li>Two tabs appear, <strong>Payments by day</strong> and <strong>Payments list</strong>, and refresh every hour.</li>
+          <li>A tab called <strong>Payments</strong> appears and refreshes every hour.</li>
         </ol>
         <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
         <p class="hint">Keep this script and the sheet private: they show names and emails. If the script leaks, make a new key here and the old one stops working.</p>
@@ -2323,18 +2323,11 @@ function writeTab(name, head, data, formats) {
 }
 
 function updatePayments() {
-  const days = call("payments_by_day");
-  writeTab("Payments by day",
-    ["Date", "Week ending (due day)", "People who paid", "Submissions", "Earned (Rs)", "Paid (Rs)", "Share paid", "Verified", "Pending", "Rejected", "Who paid"],
-    days.map(r => [toDate(r.day), toDate(r.week_ending), r.people, r.submissions, Number(r.earned), Number(r.paid),
-      Number(r.earned) ? Number(r.paid) / Number(r.earned) : "", r.verified, r.pending, r.rejected, r.who_paid || ""]),
-    [[1, 2, "ddd, d mmm yyyy"], [5, 2, "#,##0.00"], [7, 1, "0.0%"]]);
-
   const list = call("payments_list");
-  writeTab("Payments list",
-    ["Date", "Name", "Email"],
-    list.map(r => [toDateTime(r.submitted_at), r.name, r.email]),
-    [[1, 1, "d mmm yyyy, h:mm am/pm"]]);
+  writeTab("Payments",
+    ["Date", "Name", "Email", "Amount paid (Rs)"],
+    list.map(r => [toDateTime(r.submitted_at), r.name, r.email, Number(r.paid)]),
+    [[1, 1, "d mmm yyyy, h:mm am/pm"], [4, 1, "#,##0.00"]]);
 }
 
 function setupHourly() {
