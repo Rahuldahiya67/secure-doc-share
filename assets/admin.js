@@ -1899,7 +1899,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab with every payment and all its details (date, name, email, phone, Outlier ID, referrer, amounts, UTR, status) plus a "View screenshots" link that opens the payment in this dashboard. Screenshots themselves stay private.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab with every payment: date, name, email, earned, paid, % paid, paid via, UTR, status, and a "View screenshots" link that opens the payment in this dashboard. Screenshots themselves stay private.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2283,7 +2283,7 @@
           <li>A tab called <strong>Payments</strong> appears and refreshes every hour.</li>
         </ol>
         <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
-        <p class="hint">Keep this script and the sheet private: they show names, emails, phone numbers and UTRs. If the script leaks, make a new key here and the old one stops working.</p>
+        <p class="hint">Keep this script and the sheet private: they show names, emails, amounts and UTRs. If the script leaks, make a new key here and the old one stops working.</p>
       </div>
       <div class="dlg-foot"><button type="button" data-close>Done</button><button class="primary" type="button" data-act="copyScript">Copy script</button></div>`, async () => {});
     $('[data-act="copyScript"]', dlg).onclick = async () => { try { await navigator.clipboard.writeText(script); toast("Script copied"); } catch { $("#shScript").select(); } };
@@ -2328,21 +2328,19 @@ function updatePayments() {
   const STATUS = { pending: "Pending", verified: "Verified", rejected: "Rejected" };
   const VIA = { gpay: "Google Pay", phonepe: "PhonePe", paytm: "Paytm", upi: "Other UPI app", qr: "Scanned QR", bank: "Bank transfer", other: "Other" };
   writeTab("Payments",
-    ["Submitted", "Payout date", "Name", "Email", "Phone", "Outlier ID", "Referred by",
-     "Earned (Rs)", "Paid (Rs)", "Share paid", "Paid via", "UTR", "Status", "Reviewed by", "Screenshots"],
-    list.map(r => [toDateTime(r.submitted_at), toDate(r.payout_date), r.name, r.email,
-      r.phone ? "'" + r.phone : "", r.outlier_id ? "'" + r.outlier_id : "", r.referred_by || "",
+    ["Date", "Name", "Email", "Earned (Rs)", "Paid (Rs)", "% paid", "Paid via", "UTR", "Status", "Screenshots"],
+    list.map(r => [toDateTime(r.submitted_at), r.name, r.email,
       Number(r.earned), Number(r.paid), r.percent == null ? "" : Number(r.percent) / 100,
-      VIA[r.paid_via] || r.paid_via || "", r.utr ? "'" + r.utr : "", STATUS[r.status] || r.status, r.reviewed_by || "",
+      VIA[r.paid_via] || r.paid_via || "", r.utr ? "'" + r.utr : "", STATUS[r.status] || r.status,
       '=HYPERLINK("' + DASHBOARD + '#payment/' + r.id + '","View screenshots")']),
-    [[1, 1, "d mmm yyyy, h:mm am/pm"], [2, 1, "d mmm yyyy"], [8, 2, "#,##0.00"], [10, 1, "0.0%"]]);
+    [[1, 1, "d mmm yyyy, h:mm am/pm"], [4, 2, "#,##0.00"], [6, 1, "0.0%"]]);
   colourStatus();
 }
 
 // Green for verified, amber for pending, red for rejected.
 function colourStatus() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Payments");
-  const range = sh.getRange("M2:M");
+  const range = sh.getRange("I2:I");
   sh.setConditionalFormatRules([
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("Verified").setBackground("#d9f2e6").setFontColor("#0f5132").setRanges([range]).build(),
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("Pending").setBackground("#fff3cd").setFontColor("#664d03").setRanges([range]).build(),
