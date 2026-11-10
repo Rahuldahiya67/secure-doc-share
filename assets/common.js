@@ -91,6 +91,8 @@
 
   // Current page URL without the auth code/hash, used as the sign-in redirect.
   function returnUrl() {
+    // Sign-in drops the #part of the address; keep it to reopen the same page afterwards.
+    try { if (window.location.hash.length > 1) sessionStorage.setItem("returnHash", window.location.hash); } catch (_) {}
     const u = new URL(window.location.href);
     u.hash = "";
     u.searchParams.delete("code");
