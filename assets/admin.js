@@ -2306,9 +2306,17 @@
         <ol class="steps-list">
           <li>Open your Google Sheet (or make a new one), then <strong>Extensions → Apps Script</strong>.</li>
           <li>Delete what's there, paste the script below, and click <strong>Save</strong>.</li>
+          <li>To copy screenshots into Google Drive, put the screenshot login's email and password in <strong>BOT_EMAIL</strong> and <strong>BOT_PASSWORD</strong> near the top (steps below).</li>
           <li>At the top, pick <strong>setupHourly</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
-          <li>A tab called <strong>Payments</strong> appears and refreshes every hour.</li>
+          <li>A tab called <strong>Payments</strong> appears and refreshes every hour. Screenshots go to a Drive folder called <strong>Payment screenshots</strong>; share that folder with anyone who should see them.</li>
         </ol>
+        <details class="table-view"><summary>Create the screenshot login (one time)</summary>
+          <ol class="steps-list">
+            <li>Supabase → <strong>Authentication → Users → Add user → Create new user</strong>.</li>
+            <li>Email: any address you won't use for anything else, e.g. <code>sheet-bot@proaitrainers.in</code>. Choose a long password and tick <strong>Auto Confirm User</strong>.</li>
+            <li>Here in the dashboard: <strong>Security → Admins → Screenshot viewers</strong>, add that same email.</li>
+          </ol>
+          <p class="hint">That login can only read payment screenshots. It can't see the dashboard or change anything.</p></details>
         <textarea id="shScript" rows="10" readonly style="font-family:ui-monospace,monospace;font-size:12px">${esc(script)}</textarea>
         <p class="hint">Keep this script and the sheet private: they show names, emails, amounts and UTRs. If the script leaks, make a new key here and the old one stops working.</p>
       </div>
@@ -2322,6 +2330,11 @@
 const API = ${JSON.stringify(cfg.supabaseUrl + "/rest/v1/rpc/")};
 const ANON_KEY = ${JSON.stringify(cfg.supabaseAnonKey)};
 const SHOTS = ${JSON.stringify(location.origin + location.pathname.replace(/admin\.html$/, "") + "proof.html?id=")};
+const SUPA = ${JSON.stringify(cfg.supabaseUrl)};
+// Screenshot-only login you created in Supabase (Authentication -> Users -> Add user).
+// Leave as is to skip copying screenshots to Drive.
+const BOT_EMAIL = "PASTE_SCREENSHOT_LOGIN_EMAIL";
+const BOT_PASSWORD = "PASTE_SCREENSHOT_LOGIN_PASSWORD";
 const SHEET_KEY = ${JSON.stringify(token)};
 
 function call(fn) {
@@ -2352,6 +2365,7 @@ function writeTab(name, head, data, formats) {
 
 function updatePayments() {
   const list = call("payments_list");
+  const folders = saveScreenshots(list);
   const STATUS = { pending: "Pending", verified: "Verified", rejected: "Rejected" };
   const VIA = { gpay: "Google Pay", phonepe: "PhonePe", paytm: "Paytm", upi: "Other UPI app", qr: "Scanned QR", bank: "Bank transfer", other: "Other" };
   writeTab("Payments",
@@ -2359,9 +2373,55 @@ function updatePayments() {
     list.map(r => [toDateTime(r.submitted_at), r.name, r.email,
       Number(r.earned), Number(r.paid), r.percent == null ? "" : Number(r.percent) / 100,
       VIA[r.paid_via] || r.paid_via || "", r.utr ? "'" + r.utr : "", STATUS[r.status] || r.status,
-      '=HYPERLINK("' + SHOTS + r.id + '","View screenshots")']),
+      folders[r.id] ? '=HYPERLINK("' + folders[r.id] + '","View screenshots")'
+                    : '=HYPERLINK("' + SHOTS + r.id + '","View screenshots")']),
     [[1, 1, "d mmm yyyy, h:mm am/pm"], [4, 2, "#,##0.00"], [6, 1, "0.0%"]]);
   colourStatus();
+}
+
+// ---- Screenshots -> Google Drive -------------------------------------------
+// Copies each payment's screenshots into Drive: "Payment screenshots" / one folder
+// per payment. Already-copied payments are skipped. Share the main folder once with
+// anyone who should see screenshots.
+function saveScreenshots(list) {
+  const props = PropertiesService.getScriptProperties();
+  const done = {};
+  list.forEach(r => { const f = props.getProperty("f_" + r.id); if (f) done[r.id] = "https://drive.google.com/drive/folders/" + f; });
+  if (!BOT_EMAIL || BOT_EMAIL.indexOf("@") < 0 || !BOT_PASSWORD || BOT_PASSWORD.indexOf("PASTE") === 0) return done;
+  const todo = list.filter(r => !done[r.id] && r.earnings_path).slice(0, 40); // the rest next hour
+  if (!todo.length) return done;
+  const jwt = login();
+  const root = mainFolder(props);
+  const L = { earnings_path: "Earnings", referral_path: "Referral", payment_path: "Payment" };
+  todo.forEach(r => {
+    const day = String(r.submitted_at).slice(0, 10);
+    const sub = root.createFolder(day + " " + r.name + " (" + String(r.id).slice(0, 8) + ")");
+    Object.keys(L).forEach(k => {
+      if (!r[k]) return;
+      const res = UrlFetchApp.fetch(SUPA + "/storage/v1/object/authenticated/payment-proofs/" + r[k].split("/").map(encodeURIComponent).join("/"), {
+        headers: { apikey: ANON_KEY, Authorization: "Bearer " + jwt }, muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) return;
+      const ext = (r[k].match(/\\.(jpe?g|png|webp)$/i) || [".jpg"])[0];
+      sub.createFile(res.getBlob().setName(L[k] + ext));
+    });
+    props.setProperty("f_" + r.id, sub.getId());
+    done[r.id] = sub.getUrl();
+  });
+  return done;
+}
+function login() {
+  const res = UrlFetchApp.fetch(SUPA + "/auth/v1/token?grant_type=password", {
+    method: "post", contentType: "application/json", muteHttpExceptions: true,
+    headers: { apikey: ANON_KEY }, payload: JSON.stringify({ email: BOT_EMAIL, password: BOT_PASSWORD }) });
+  if (res.getResponseCode() !== 200) throw new Error("Screenshot login failed. Check BOT_EMAIL and BOT_PASSWORD: " + res.getContentText());
+  return JSON.parse(res.getContentText()).access_token;
+}
+function mainFolder(props) {
+  const id = props.getProperty("folder");
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) {} }
+  const f = DriveApp.createFolder("Payment screenshots");
+  props.setProperty("folder", f.getId());
+  return f;
 }
 
 // Green for verified, amber for pending, red for rejected.
