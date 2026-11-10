@@ -32,7 +32,7 @@
   const D = {}; // derived indexes
 
   async function load() {
-    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins, quizRows, profiles] = await Promise.all([
+    const [docs, sessions, blocked, payments, accounts, settings, audit, owner, peopleRows, groups, requests, docViews, anns, faqs, feedback, role, locks, devReqs, admins, quizRows, profiles, shotViewers] = await Promise.all([
       sb.from("documents")
         .select("*,document_access(email,added_at)")
         .order("created_at", { ascending: false }),
@@ -57,7 +57,8 @@
       sb.from("device_requests").select("*").order("created_at", { ascending: false }).limit(300),
       sb.from("admins").select("*").order("email"),
       sb.from("quizzes").select("*,quiz_questions(*),quiz_attempts(id,email,score,total,passed,answers,created_at)").order("created_at", { ascending: false }),
-      sb.from("candidate_profiles").select("*")
+      sb.from("candidate_profiles").select("*"),
+      sb.from("screenshot_viewers").select("*").order("email")
     ]);
     if (docs.error) throw docs.error;
     S.docs = docs.data || [];
@@ -84,6 +85,8 @@
     S.quizV1 = !quizRows.error;
     S.profiles = profiles.error ? [] : profiles.data || [];
     S.profilesV1 = !profiles.error;
+    S.shotViewersV1 = !shotViewers.error;
+    S.shotViewers = shotViewers.data || [];
     S.quizzes = (quizRows.data || []).map(z => ({ ...z, quiz_attempts: (z.quiz_attempts || []).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) }));
     const exp = (settings.data || []).find(s => s.key === "expected_percent");
     S.expectedPercent = exp ? Number(exp.value) : 0;
@@ -1369,7 +1372,17 @@
         <p style="margin:0 0 6px"><strong>Owner</strong>: everything, including payment accounts, settings and admins.</p>
         <p style="margin:0 0 6px"><strong>Admin</strong>: share documents, manage people, review payments and reply to feedback.</p>
         <p style="margin:0"><strong>View only</strong>: can see the dashboard but can't change anything. The database refuses their changes.</p>
-      </div></div>`;
+      </div></div>
+      <div class="panel section-gap">
+        <div class="panel-head"><h2>Screenshot viewers</h2><span class="muted small-text">No dashboard access</span></div>
+        <div class="panel-body small-text" style="padding-bottom:0"><p style="margin:0">These emails can only open payment screenshots from the "View screenshots" links in your Google Sheet. They can't see this dashboard, people, documents or anything else.</p></div>
+        ${S.shotViewersV1 ? `${S.shotViewers.length ? `<div class="table-wrap"><table class="data"><tbody>${S.shotViewers.map(v => `<tr>
+          <td><div class="cell-title">${esc(v.email)}</div><div class="cell-sub">Added ${esc(fmtDate(v.added_at))} by ${esc(v.added_by)}</div></td>
+          <td class="num">${S.isOwner ? `<button class="small ghost" type="button" data-rmshot="${esc(v.email)}">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
+          ${S.isOwner ? `<div class="panel-body row"><input id="shotEmail" type="email" placeholder="their Gmail ID" style="flex:1;min-width:200px" aria-label="Email to allow">
+            <button class="primary small" type="button" data-act="addShot">Allow screenshots</button></div>` : ""}`
+          : `<div class="panel-body"><p class="hint" style="margin:0">Run <code>supabase/015_screenshot_viewers.sql</code> to switch this on.</p></div>`}
+      </div>`;
     const add = $('[data-act="addAdmin"]');
     if (add) add.onclick = () => openDialog(`
       <div class="dlg-head"><h2>Add an admin</h2><p class="sub" style="margin:6px 0 0">They sign in at the admin page with this Google account.</p></div>
@@ -1386,6 +1399,19 @@
       const { error } = await sb.from("admins").update({ role: sel.value }).eq("email", sel.dataset.role);
       if (error) { toast(/last_owner/.test(error.message) ? "There must always be one owner." : error.message); return refresh(); }
       toast("Role changed"); await refresh();
+    });
+    const addShot = $('[data-act="addShot"]');
+    if (addShot) addShot.onclick = async () => {
+      const email = $("#shotEmail").value.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return toast("Check the email.");
+      const { error } = await sb.from("screenshot_viewers").insert({ email });
+      if (error) return toast(/duplicate/.test(error.message) ? "Already allowed." : error.message);
+      toast(`${email} can now open payment screenshots`); await refresh();
+    };
+    $$("[data-rmshot]", view).forEach(b => b.onclick = async () => {
+      const { error } = await sb.from("screenshot_viewers").delete().eq("email", b.dataset.rmshot);
+      if (error) return toast(error.message);
+      toast("Removed. They can't open screenshots any more."); await refresh();
     });
     $$("[data-rmadmin]", view).forEach(b => b.onclick = () => confirmDialog({
       title: `Remove ${b.dataset.rmadmin}?`, text: "They lose access to this dashboard straight away.", confirm: "Remove", danger: true,
@@ -1899,7 +1925,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab with every payment: date, name, email, earned, paid, % paid, paid via, UTR, status, and a "View screenshots" link that opens the payment in this dashboard. Screenshots themselves stay private.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab with every payment: date, name, email, earned, paid, % paid, paid via, UTR, status, and a "View screenshots" link. The link works only for admins and the screenshot viewers you allow under Security → Admins; screenshots stay private.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2043,6 +2069,7 @@
       case "faqs": return `${verb} help question "${row.question}"`;
       case "feedback": return r.action === "delete" ? `Deleted feedback from ${o.email}` : changed.includes("admin_reply") ? `Replied to ${n.email}'s feedback` : `Marked ${n.email}'s feedback ${n.status}`;
       case "device_locks": return r.action === "delete" ? `Reset the phone lock for ${o.email}` : `Moved ${n.email}'s phone lock to ${n.device_label || "a new phone"}`;
+      case "screenshot_viewers": return r.action === "insert" ? `Allowed ${n.email} to view payment screenshots` : `Removed ${o.email} from screenshot viewers`;
       case "device_requests": return `${n.status === "approved" ? "Allowed" : n.status === "declined" ? "Declined" : "Changed"} ${row.email}'s new phone (${row.device_label || "Android"})`;
     }
     return `${r.action} on ${r.table_name}`;
@@ -2294,7 +2321,7 @@
 // Run setupHourly once; after that the sheet updates itself every hour.
 const API = ${JSON.stringify(cfg.supabaseUrl + "/rest/v1/rpc/")};
 const ANON_KEY = ${JSON.stringify(cfg.supabaseAnonKey)};
-const DASHBOARD = ${JSON.stringify(location.origin + location.pathname)};
+const SHOTS = ${JSON.stringify(location.origin + location.pathname.replace(/admin\.html$/, "") + "proof.html?id=")};
 const SHEET_KEY = ${JSON.stringify(token)};
 
 function call(fn) {
@@ -2332,7 +2359,7 @@ function updatePayments() {
     list.map(r => [toDateTime(r.submitted_at), r.name, r.email,
       Number(r.earned), Number(r.paid), r.percent == null ? "" : Number(r.percent) / 100,
       VIA[r.paid_via] || r.paid_via || "", r.utr ? "'" + r.utr : "", STATUS[r.status] || r.status,
-      '=HYPERLINK("' + DASHBOARD + '#payment/' + r.id + '","View screenshots")']),
+      '=HYPERLINK("' + SHOTS + r.id + '","View screenshots")']),
     [[1, 1, "d mmm yyyy, h:mm am/pm"], [4, 2, "#,##0.00"], [6, 1, "0.0%"]]);
   colourStatus();
 }
