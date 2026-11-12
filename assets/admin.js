@@ -1925,7 +1925,7 @@
       <div class="panel section-gap">
         <div class="panel-head"><h2>Google Sheet</h2><span class="muted small-text">${S.sheetKey ? `Connected since ${esc(fmtDate(S.sheetKey.created_at))}` : "Not connected"}</span></div>
         <div class="panel-body">
-          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every hour: one tab with every payment: date, name, email, earned, paid, % paid, paid via, UTR, status, and a "View screenshots" link. The link works only for admins and the screenshot viewers you allow under Security → Admins; screenshots stay private.</p>
+          <p class="small-text" style="margin:0">Keep a Google Sheet that fills itself every 5 minutes: one tab with every payment: date, name, email, earned, paid, % paid, paid via, UTR, status, and a "View screenshots" link. The link works only for admins and the screenshot viewers you allow under Security → Admins; screenshots stay private.</p>
           ${owner ? `<div class="row" style="margin-top:12px"><button type="button" class="${S.sheetKey ? "" : "primary"}" data-act="sheetKey">${S.sheetKey ? "Make a new key and script" : "Connect a Google Sheet"}</button>
             ${S.sheetKey ? `<button type="button" class="ghost" data-act="sheetOff">Disconnect</button>` : ""}</div>` : `<p class="hint">Only the owner can connect a sheet.</p>`}
         </div>
@@ -2307,8 +2307,8 @@
           <li>Open your Google Sheet (or make a new one), then <strong>Extensions → Apps Script</strong>.</li>
           <li>Delete what's there, paste the script below, and click <strong>Save</strong>.</li>
           <li>To copy screenshots into Google Drive, put the screenshot login's email and password in <strong>BOT_EMAIL</strong> and <strong>BOT_PASSWORD</strong> near the top (steps below).</li>
-          <li>At the top, pick <strong>setupHourly</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
-          <li>A tab called <strong>Payments</strong> appears and refreshes every hour. Screenshots go to a Drive folder called <strong>Payment screenshots</strong>; share that folder with anyone who should see them.</li>
+          <li>At the top, pick <strong>setupAutoRefresh</strong> and click <strong>Run</strong>. Allow access when Google asks (it's your own script).</li>
+          <li>A tab called <strong>Payments</strong> appears and refreshes every 5 minutes. Reload the sheet to get a <strong>Pro AI Trainers → Refresh now</strong> menu for instant updates. Screenshots go to a Drive folder called <strong>Payment screenshots</strong>; share that folder with anyone who should see them.</li>
         </ol>
         <details class="table-view"><summary>Create the screenshot login (one time)</summary>
           <ol class="steps-list">
@@ -2435,13 +2435,43 @@ function colourStatus() {
   ]);
 }
 
-function setupHourly() {
-  ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === "updatePayments")
-    .forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger("updatePayments").timeBased().everyHours(1).create();
-  updatePayments();
+// ---- Refreshing --------------------------------------------------------------
+// Runs every 5 minutes, and from the "Pro AI Trainers -> Refresh now" menu.
+// A lock stops two refreshes running at once (no duplicate Drive folders).
+function autoRefresh() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return; // another refresh is already running
+  try { updatePayments(); } finally { lock.releaseLock(); }
 }
+
+function refreshNow() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { ss.toast("A refresh is already running. Try again in a moment.", "Pro AI Trainers", 5); return; }
+  try {
+    ss.toast("Refreshing payments…", "Pro AI Trainers", 30);
+    updatePayments();
+    ss.toast("Up to date.", "Pro AI Trainers", 4);
+  } catch (e) {
+    ss.toast("Couldn't refresh: " + e.message, "Pro AI Trainers", 10);
+    throw e;
+  } finally { lock.releaseLock(); }
+}
+
+// Adds the menu when the sheet opens (only people who can edit the sheet can use it).
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu("Pro AI Trainers").addItem("Refresh now", "refreshNow").addToUi();
+}
+
+// Run this once (or again after changing the script) to start the 5-minute refresh.
+function setupAutoRefresh() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => ["updatePayments", "autoRefresh"].indexOf(t.getHandlerFunction()) >= 0)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger("autoRefresh").timeBased().everyMinutes(5).create();
+  refreshNow();
+}
+function setupHourly() { setupAutoRefresh(); } // old name, still works
 `;
   }
 
