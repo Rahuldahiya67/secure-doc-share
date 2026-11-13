@@ -747,10 +747,9 @@
               <div class="form-grid">
                 <div><label for="prName" style="margin-top:0">Name</label><input id="prName" type="text" maxlength="120" value="${esc(r.row?.display_name || r.name)}"></div>
                 <div><label for="prRef" style="margin-top:0">Referred by</label>
-                  <input id="prRef" type="text" maxlength="120" list="refNames" autocomplete="off" placeholder="Type the referrer's name" value="${esc(r.row?.referred_by_name || "")}">
+                  <input id="prRef" type="text" maxlength="120" list="refNames" autocomplete="off" placeholder="Type the referrer's name" value="${esc(r.row?.referred_by_name || r.candidateRef || "")}">
                   <datalist id="refNames">${[...new Set(others.map(e => nameOf(e)))].sort().map(n => `<option value="${esc(n)}">`).join("")}</datalist>
-                  <p class="hint">${r.row?.referred_by_name ? "Final: the candidate sees this in their account and can't change it." : "What you type here becomes final: the candidate sees it in their account and can't change it."}
-                    ${r.candidateRef && r.candidateRef !== r.row?.referred_by_name ? ` They wrote: "${esc(r.candidateRef)}" <a href="#" data-act="useTheirs">Use this</a>` : ""}</p></div>
+                  <p class="hint">${r.row?.referred_by_name ? "Set by you: the candidate sees this in their profile and can't change it." : r.candidateRef ? "Entered by the candidate. Change it and save, and their profile updates to your name (then it's locked for them)." : "Type a name and save; it shows in the candidate's profile and is locked for them."}</p></div>
               </div>
               <label for="prTags">Tags</label>
               <input id="prTags" type="text" maxlength="300" placeholder="e.g. active, needs follow-up, top performer" value="${esc(r.tags.join(", "))}">
@@ -824,7 +823,6 @@
         toast("Access removed"); await refresh();
       }
     });
-    if (act("useTheirs")) act("useTheirs").onclick = e => { e.preventDefault(); $("#prRef").value = r.candidateRef; $("#prRef").focus(); };
     if (act("resetPhone")) act("resetPhone").onclick = async () => {
       const { error } = await sb.from("device_locks").delete().eq("email", email);
       if (error) return toast(error.message);
@@ -833,12 +831,14 @@
     act("saveProfile").onclick = async () => {
       const tags = [...new Set($("#prTags").value.split(",").map(t => t.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
       // Referrer: the name typed here is final. Link it to a known person for the referral tree.
-      const refText = $("#prRef").value.trim();
+      let refText = $("#prRef").value.trim();
+      // Unchanged from what the candidate typed: leave it as theirs (not locked).
+      if (!r.row?.referred_by_name && refText === (r.candidateRef || "").trim()) refText = "";
       const lc = refText.toLowerCase();
       const matches = refText ? [...D.people.keys()].filter(e => e !== email && (e === lc || nameOf(e).toLowerCase() === lc)) : [];
       const row = {
         email, display_name: $("#prName").value.trim() || null,
-        referred_by_name: refText || null, referred_by_email: matches.length === 1 ? matches[0] : null,
+        referred_by_name: refText || null, referred_by_email: matches.length === 1 ? matches[0] : (r.row?.referred_by_email || null),
         tags, notes: $("#prNotes").value.trim() || null, updated_at: new Date().toISOString()
       };
       let { error } = await sb.from("people").upsert(row);
