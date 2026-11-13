@@ -570,3 +570,4 @@ body.readonly .main [data-group], body.readonly .main #payDay, body.readonly .ma
 .proof-grid figure { margin: 0; border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px; background: var(--surface-2); }
 .proof-grid figcaption { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
 .proof-grid img { display: block; width: 100%; height: auto; border-radius: 6px; background: var(--surface); min-height: 120px; }
+.req-onb { margin-top: 6px; font-size: 14px; white-space: pre-line; max-width: 640px; }

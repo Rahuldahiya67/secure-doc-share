@@ -423,6 +423,7 @@
       <p class="sub" style="margin:0 0 6px">${last?.status === "declined" ? "Your last request was declined. You can send a new one." : last?.status === "approved" ? "Your last request was approved. Need more? Ask again." : "Send a request to the owner with your email ID."}</p>
       <form id="reqForm">
         <label for="rqName">Your name</label><input id="rqName" type="text" required maxlength="120" value="${esc(name)}">
+        <label for="rqOnb">Onboarding description</label><textarea id="rqOnb" rows="4" required maxlength="1000" placeholder="Which platform or project you're onboarding for, where you are in onboarding, and anything the owner should know"></textarea>
         <label for="rqMsg">Message (optional)</label><textarea id="rqMsg" rows="3" maxlength="500" placeholder="e.g. Referred by Hrsh, joining Batch 3"></textarea>
         <button class="primary full" type="submit" style="margin-top:12px">Send request</button>
         <p class="msg" id="rqStatus" role="status"></p>
@@ -430,7 +431,13 @@
     $("#reqForm", box).onsubmit = async e => {
       e.preventDefault();
       const btn = $("button[type=submit]", box); btn.disabled = true;
-      const { error: iErr } = await sb.from("access_requests").insert({ name: $("#rqName").value.trim(), message: $("#rqMsg").value.trim() || null });
+      const row = { name: $("#rqName").value.trim(), onboarding: $("#rqOnb").value.trim(), message: $("#rqMsg").value.trim() || null };
+      if (!row.onboarding) { btn.disabled = false; const st = $("#rqStatus"); st.className = "msg err"; st.textContent = "Please add your onboarding description."; return; }
+      let { error: iErr } = await sb.from("access_requests").insert(row);
+      // Before 017_request_onboarding.sql is run the column doesn't exist; keep the description in the message.
+      if (iErr && /onboarding/.test(iErr.message)) {
+        ({ error: iErr } = await sb.from("access_requests").insert({ name: row.name, message: (`Onboarding: ${row.onboarding}` + (row.message ? `\n${row.message}` : "")).slice(0, 500) }));
+      }
       if (iErr) {
         btn.disabled = false;
         const st = $("#rqStatus"); st.className = "msg err";

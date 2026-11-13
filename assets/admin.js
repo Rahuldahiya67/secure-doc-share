@@ -1007,7 +1007,7 @@
       <div class="panel">
         <div class="panel-head"><h2>Waiting</h2><span class="muted small-text">${pend.length}</span></div>
         ${pend.length ? `<div class="table-wrap"><table class="data"><tbody>${pend.map(r => `<tr>
-          <td><div class="cell-title">${esc(r.name)}</div><div class="cell-sub">${esc(r.email)}, ${esc(timeAgo(r.created_at))}</div>${r.message ? `<div class="cell-sub">"${esc(r.message)}"</div>` : ""}</td>
+          <td><div class="cell-title">${esc(r.name)}</div><div class="cell-sub">${esc(r.email)}, ${esc(timeAgo(r.created_at))}</div>${r.onboarding ? `<div class="req-onb"><strong>Onboarding:</strong> ${esc(r.onboarding)}</div>` : ""}${r.message ? `<div class="cell-sub">"${esc(r.message)}"</div>` : ""}</td>
           <td class="num"><div class="row end"><button class="small primary" type="button" data-approve="${r.id}">Approve</button>
             <button class="small" type="button" data-decline="${r.id}">Decline</button></div></td></tr>`).join("")}</tbody></table></div>`
           : emptyState("No requests waiting", "When someone with no documents taps Request access in the app, they show up here.")}
@@ -1028,6 +1028,7 @@
     openDialog(`
       <div class="dlg-head"><h2>Approve ${esc(req.name)}</h2><p class="sub" style="margin:6px 0 0">${esc(req.email)}. Choose what they can open.</p></div>
       <div class="dlg-body">
+        ${req.onboarding ? `<blockquote class="fb-quote" style="margin-bottom:10px"><strong>Onboarding:</strong> ${esc(req.onboarding)}</blockquote>` : ""}
         ${S.groups.length ? `<label style="margin-top:6px">Add to groups</label><div class="check-list">${S.groups.map(g => `<label class="row" style="margin:0;gap:8px;font-weight:400"><input type="checkbox" name="apG" value="${g.id}"> ${esc(g.name)} <span class="muted small-text">${g.group_documents.length} docs</span></label>`).join("")}</div>` : ""}
         <label>Give access to documents</label>
         <div class="check-list" style="max-height:220px;overflow:auto">${S.docs.map(d => `<label class="row" style="margin:0;gap:8px;font-weight:400"><input type="checkbox" name="apD" value="${d.id}"> ${esc(d.title)}</label>`).join("") || `<p class="muted small-text">No documents yet.</p>`}</div>
