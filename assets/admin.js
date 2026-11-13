@@ -692,7 +692,8 @@
     return {
       email, row, name, tags: row?.tags || [], notes: row?.notes || "", outlierId: prof?.outlier_id || pays[0]?.outlier_id || "",
       phone: prof?.phone || "", profile: prof,
-      referrer: referrerOf(email), referredText: prof?.referred_by || pays.find(x => x.referred_by)?.referred_by || "",
+      referrer: referrerOf(email), referredText: row?.referred_by_name || prof?.referred_by || pays.find(x => x.referred_by)?.referred_by || "",
+      candidateRef: prof?.referred_by || pays.find(x => x.referred_by)?.referred_by || "",
       groups: S.groups.filter(g => g.group_members.some(m => m.email === email)),
       docs: p.docs, opened: p.opened, sessions, secs: sum(sessions, s => s.seconds), live: sessions.some(isLive),
       pays, paid: sum(pays.filter(x => x.status !== "rejected"), x => Number(x.amount_sent)),
@@ -704,7 +705,7 @@
   function referrerOf(email) {
     const row = S.peopleRows.find(x => x.email === email);
     if (row?.referred_by_email) return row.referred_by_email;
-    const text = (S.profiles.find(x => x.email === email)?.referred_by || S.payments.find(x => x.email === email && x.referred_by)?.referred_by || "").trim().toLowerCase();
+    const text = (row?.referred_by_name || S.profiles.find(x => x.email === email)?.referred_by || S.payments.find(x => x.email === email && x.referred_by)?.referred_by || "").trim().toLowerCase();
     if (!text) return null;
     if (text.includes("@")) return D.people.has(text) && text !== email ? text : null;
     for (const e of D.people.keys()) {
@@ -746,8 +747,10 @@
               <div class="form-grid">
                 <div><label for="prName" style="margin-top:0">Name</label><input id="prName" type="text" maxlength="120" value="${esc(r.row?.display_name || r.name)}"></div>
                 <div><label for="prRef" style="margin-top:0">Referred by</label>
-                  <select id="prRef"><option value="">Nobody / not known</option>${others.map(e => `<option value="${esc(e)}" ${r.referrer === e ? "selected" : ""}>${esc(nameOf(e))}${nameOf(e) !== e ? ` (${esc(e)})` : ""}</option>`).join("")}</select>
-                  ${r.referredText ? `<p class="hint">They wrote: "${esc(r.referredText)}"${r.row?.referred_by_email ? "" : r.referrer ? " (matched automatically)" : " (no match yet, pick the right person)"}</p>` : ""}</div>
+                  <input id="prRef" type="text" maxlength="120" list="refNames" autocomplete="off" placeholder="Type the referrer's name" value="${esc(r.row?.referred_by_name || "")}">
+                  <datalist id="refNames">${[...new Set(others.map(e => nameOf(e)))].sort().map(n => `<option value="${esc(n)}">`).join("")}</datalist>
+                  <p class="hint">${r.row?.referred_by_name ? "Final: the candidate sees this in their account and can't change it." : "What you type here becomes final: the candidate sees it in their account and can't change it."}
+                    ${r.candidateRef && r.candidateRef !== r.row?.referred_by_name ? ` They wrote: "${esc(r.candidateRef)}" <a href="#" data-act="useTheirs">Use this</a>` : ""}</p></div>
               </div>
               <label for="prTags">Tags</label>
               <input id="prTags" type="text" maxlength="300" placeholder="e.g. active, needs follow-up, top performer" value="${esc(r.tags.join(", "))}">
@@ -821,6 +824,7 @@
         toast("Access removed"); await refresh();
       }
     });
+    if (act("useTheirs")) act("useTheirs").onclick = e => { e.preventDefault(); $("#prRef").value = r.candidateRef; $("#prRef").focus(); };
     if (act("resetPhone")) act("resetPhone").onclick = async () => {
       const { error } = await sb.from("device_locks").delete().eq("email", email);
       if (error) return toast(error.message);
@@ -828,10 +832,20 @@
     };
     act("saveProfile").onclick = async () => {
       const tags = [...new Set($("#prTags").value.split(",").map(t => t.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
-      const { error } = await sb.from("people").upsert({
-        email, display_name: $("#prName").value.trim() || null, referred_by_email: $("#prRef").value || null,
+      // Referrer: the name typed here is final. Link it to a known person for the referral tree.
+      const refText = $("#prRef").value.trim();
+      const lc = refText.toLowerCase();
+      const matches = refText ? [...D.people.keys()].filter(e => e !== email && (e === lc || nameOf(e).toLowerCase() === lc)) : [];
+      const row = {
+        email, display_name: $("#prName").value.trim() || null,
+        referred_by_name: refText || null, referred_by_email: matches.length === 1 ? matches[0] : null,
         tags, notes: $("#prNotes").value.trim() || null, updated_at: new Date().toISOString()
-      });
+      };
+      let { error } = await sb.from("people").upsert(row);
+      if (error && /referred_by_name/.test(error.message)) {
+        delete row.referred_by_name; ({ error } = await sb.from("people").upsert(row));
+        if (!error) toast("Saved. Run supabase/018_final_referrer.sql to make the referrer final for the candidate.");
+      }
       if (error) return toast(error.message);
       toast("Profile saved"); await refresh();
     };

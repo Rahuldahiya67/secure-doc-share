@@ -357,7 +357,12 @@
 
   // Fill name, Outlier ID and referrer from the person's saved profile.
   async function prefillFromProfile() {
-    const { data: pr, error } = await sb.from("candidate_profiles").select("full_name,outlier_id,referred_by").maybeSingle();
+    const [{ data: pr, error }, { data: fin }] = await Promise.all([
+      sb.from("candidate_profiles").select("full_name,outlier_id,referred_by").maybeSingle(),
+      sb.rpc("my_referrer").then(r => r, () => ({ data: null }))
+    ]);
+    // A referrer set by the owner/admin is final.
+    if (fin) { const ref = $("#pRef"); if (ref) { ref.value = fin; ref.readOnly = true; ref.title = "Set by Pro AI Trainers"; } }
     if (error) return;
     if (!pr) {
       $("#pName")?.closest("div")?.parentElement?.insertAdjacentHTML("beforebegin", `<p class="hint" id="prfHint" style="margin:0 0 10px"><a href="?view=me#profile">Complete your profile</a> and these details fill themselves in every time.</p>`);

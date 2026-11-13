@@ -201,7 +201,12 @@
     if (error) return undefined;
     return data || null;
   }
-  function profileForm(user, pr) {
+  // Referrer set by the owner/admin; final, so the candidate can't change it.
+  async function finalReferrer() {
+    const { data, error } = await sb.rpc("my_referrer");
+    return error ? null : data || null;
+  }
+  function profileForm(user, pr, fin) {
     const meta = user.user_metadata || {};
     return `<form id="profileForm" class="profile-form">
       <div class="form-grid">
@@ -209,7 +214,9 @@
         <div><label for="prfPhone" style="margin-top:0">Phone number</label><input id="prfPhone" type="tel" required maxlength="18" inputmode="tel" autocomplete="tel" placeholder="e.g. 98765 43210" value="${esc(pr?.phone || "")}"></div>
         <div><label for="prfEmail">Email</label><input id="prfEmail" type="email" value="${esc(user.email)}" readonly></div>
         <div><label for="prfOutlier">Outlier ID</label><input id="prfOutlier" type="text" required maxlength="120" autocomplete="off" value="${esc(pr?.outlier_id || "")}"></div>
-        <div><label for="prfRef">Referred / invited by</label><input id="prfRef" type="text" maxlength="120" autocomplete="off" placeholder="Name or email of who invited you" value="${esc(pr?.referred_by || "")}"></div>
+        <div><label for="prfRef">Referred / invited by</label>${fin
+          ? `<input id="prfRef" type="text" value="${esc(fin)}" readonly><p class="hint" style="margin-top:4px">Set by Pro AI Trainers.</p>`
+          : `<input id="prfRef" type="text" maxlength="120" autocomplete="off" placeholder="Name or email of who invited you" value="${esc(pr?.referred_by || "")}">`}</div>
       </div>
       <button class="primary full" type="submit" style="margin-top:14px">${pr ? "Save changes" : "Save profile"}</button>
       <p class="msg" id="prfMsg" role="status"></p>
@@ -235,7 +242,7 @@
   // ---------------------------------------------------------------
   async function myAccount(user) {
     root.innerHTML = `${backLinkHome()}<div class="card"><p class="muted">Loading…</p></div>`;
-    const profile = await getProfile();
+    const [profile, finRef] = await Promise.all([getProfile(), finalReferrer()]);
     const [docs, sess, pays, reqs] = await Promise.all([
       sb.from("documents").select("id,title"),
       sb.from("view_sessions").select("document_id,seconds,max_page,page_count,last_seen_at").order("last_seen_at", { ascending: false }).limit(500),
@@ -261,7 +268,7 @@
         ${req?.status === "pending" ? `<div class="notice" style="margin-bottom:12px">Your access request from ${esc(timeAgo(req.created_at))} is waiting for review.</div>` : ""}
         ${profile !== undefined ? `<h3 class="folder-head" id="profile">${profile ? "Your profile" : "Complete your profile"}</h3>
           ${profile ? "" : `<p class="small-text" style="margin:0 0 4px">Fill this in once. Every time you submit a payment, these details are filled in for you.</p>`}
-          ${profileForm(user, profile)}` : ""}
+          ${profileForm(user, profile, finRef)}` : ""}
         <h3 class="folder-head">Your documents</h3>
         ${D.length ? `<ul class="doc-list">${D.map(d => { const r = byDoc.get(d.id); return `<li><a href="?doc=${encodeURIComponent(d.id)}">
           <span class="doc-icon">${icon("file")}</span><span class="grow"><span class="t">${esc(d.title)}</span>
